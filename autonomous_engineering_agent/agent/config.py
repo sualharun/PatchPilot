@@ -7,6 +7,7 @@ from .infrastructure.config.settings import (
     load_config,
     load_repo_config,
     validate_config,
+    validate_production_config,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "load_config",
     "load_repo_config",
     "validate_config",
+    "validate_production_config",
 ]

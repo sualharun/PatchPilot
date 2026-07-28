@@ -110,6 +110,39 @@ def validate_config(config: AgentConfig) -> list[str]:
         for command in commands:
             if not isinstance(command, str) or not command.strip():
                 errors.append(f"{field_name} must contain non-empty strings")
+    if config.production:
+        errors.extend(validate_production_config(config))
+    return errors
+
+
+def validate_production_config(config: AgentConfig) -> list[str]:
+    """Boot-time checks for a real user launch. Never includes secret values, only names."""
+    errors: list[str] = []
+    if not config.database_url.startswith(("postgresql://", "postgres://")):
+        errors.append("DATABASE_URL must be a PostgreSQL URL in production")
+    if not config.dashboard_auth_enabled:
+        errors.append("DASHBOARD_AUTH_ENABLED must be true in production")
+    if not config.dashboard_session_secret:
+        errors.append("DASHBOARD_SESSION_SECRET is required in production")
+    if not config.dashboard_secure_cookies:
+        errors.append("DASHBOARD_SECURE_COOKIES must be true in production")
+    if not (config.github_oauth_client_id and config.github_oauth_client_secret and config.github_oauth_callback_url):
+        errors.append(
+            "GitHub OAuth credentials are required in production "
+            "(GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET, GITHUB_OAUTH_CALLBACK_URL)"
+        )
+    if config.github_oauth_mock_enabled:
+        errors.append("GITHUB_OAUTH_MOCK_ENABLED must be false in production")
+    has_app_key = bool(config.github_app_private_key or config.github_app_private_key_path)
+    if not (config.github_app_id and has_app_key):
+        errors.append(
+            "GitHub App credentials are required in production (GITHUB_APP_ID and "
+            "GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_PATH)"
+        )
+    if not config.github_app_webhook_secret:
+        errors.append("GITHUB_APP_WEBHOOK_SECRET is required in production")
+    if not (config.openai_api_key or config.anthropic_api_key):
+        errors.append("An OpenAI or Anthropic API key is required in production")
     return errors
 
 

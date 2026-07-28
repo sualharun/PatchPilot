@@ -31,11 +31,24 @@ from agent.domain.services import parse_issue_ref
 from agent.infrastructure.clock import SystemClock
 from agent.infrastructure.config.settings import load_config
 from agent.infrastructure.kafka import KafkaPRJobProducer
-from agent.infrastructure.security import verify_github_signature
+from agent.infrastructure.security import RateLimiter, verify_github_signature
 from agent.infrastructure.stripe import StripeClient, verify_stripe_signature
 
 SESSION_COOKIE = "patchpilot_session"
 SESSION_TTL_SECONDS = 60 * 60 * 12
+
+# Per-process fixed-window limiters; see infrastructure/security/rate_limit.py for the trade-off.
+_LOGIN_RATE_LIMITER = RateLimiter(max_requests=10, window_seconds=300)
+_QUEUE_RUN_RATE_LIMITER = RateLimiter(max_requests=20, window_seconds=3600)
+
+
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_rate_limit(limiter: RateLimiter, request: Request, *, detail: str) -> None:
+    if not limiter.allow(_client_key(request)):
+        raise HTTPException(status_code=429, detail=detail)
 
 
 def create_app(database_url: str | None = None) -> FastAPI:
@@ -180,6 +193,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         open_pr: str = Form("false"),
         csrf_token: str = Form(""),
     ):
+        _enforce_rate_limit(_QUEUE_RUN_RATE_LIMITER, request, detail="too many queued runs, try again later")
         _require_csrf(request, config, csrf_token)
         workspace_id = _request_workspace_id(request, config, queries)
         decision = container.billing.check_run_allowed(workspace_id)
@@ -459,6 +473,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         next_path: str = Form("/runs"),
         csrf_token: str = Form(""),
     ):
+        _enforce_rate_limit(_LOGIN_RATE_LIMITER, request, detail="too many login attempts, try again later")
         _require_csrf(request, config, csrf_token)
         if not _valid_login(config, username, password):
             return RedirectResponse("/login?error=invalid", status_code=303)
