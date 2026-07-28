@@ -256,6 +256,87 @@ GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem
 
 PatchPilot prefers GitHub App installation-token auth for workers when those values are present, and falls back to `GITHUB_TOKEN` for local development.
 
+## GitHub App Production Flow
+
+Beyond the manual `/api/runs` issue queueing, PatchPilot can run autonomously from a
+GitHub App installed on a user's repositories:
+
+```text
+GitHub App webhook (installation, installation_repositories, issues, pull_request)
+  -> POST /webhooks/github-app
+  -> HMAC signature validation (GITHUB_APP_WEBHOOK_SECRET)
+  -> deduplicated by X-GitHub-Delivery (webhook_deliveries table)
+  -> installation/repository state persisted (github_app_installations, github_app_repositories)
+  -> issue opened/reopened/labeled on an installed repo -> QueueRunHandler
+  -> pull_request events -> existing Kafka PR-analysis pipeline
+```
+
+- Manual issue queueing (`/api/runs`, `agent run`) keeps working unchanged.
+- `labeled` events only trigger a run when the added label matches `GITHUB_APP_TRIGGER_LABEL` (default `patchpilot`); `opened`/`reopened` always trigger.
+- The worker resolves each queued run's `installation_id` to a short-lived GitHub App installation token instead of a broad personal access token, falling back to `GITHUB_TOKEN`/`GITHUB_APP_INSTALLATION_ID` for runs without one (e.g. manually queued).
+- Every delivery is recorded with `delivery_id`, `event`, `action`, `received_at`, `processed_at`, `status`, and `error`; replays of the same delivery id are a no-op (HTTP 200 `duplicate`) instead of double-queueing.
+
+Install the GitHub App on the test repository used for this beta:
+
+```text
+https://github.com/sualharun/patchpilot-test-repo
+```
+
+## Accounts, Workspaces, and Billing
+
+GitHub OAuth login (`/auth/github/start`) creates or updates a real `users` row
+(`github_user_id`, `login`, `name`, `email`, `avatar_url`) and a personal workspace with
+an owner membership. Dashboard account info (`/settings`, `/account`) is read from that
+row instead of a static placeholder, and `/logout` clears the session. Run listings,
+stats, tests, and billing are filtered to the signed-in user's workspace; runs queued
+before a workspace existed (`workspace_id IS NULL`) stay visible everywhere.
+
+Billing is Stripe-ready but works without Stripe configured (everything defaults to the
+free plan):
+
+```bash
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID_STARTER=price_...
+STRIPE_PRICE_ID_PRO=price_...
+PATCHPILOT_PUBLIC_BASE_URL=https://app.example.com
+```
+
+- `POST /billing/checkout` (form field `plan=starter|pro`) creates a Stripe Checkout session.
+- `POST /billing/portal` opens the Stripe customer billing portal.
+- `POST /webhooks/stripe` verifies the `Stripe-Signature` header and updates `subscriptions`/`workspace_limits` on `checkout.session.completed` and `customer.subscription.*` events.
+- Plan caps: free = 5 runs/month, starter = 50 runs/month, pro = 250 runs/month + $100/month spend cap. A subscription only counts while `trialing` or `active`; `past_due`/`canceled` fall back to free.
+- Limits are enforced before queueing, both from the dashboard (`POST /api/runs`) and from GitHub App issue events.
+
+## Worker Hardening
+
+- `claim_next_queued_run` claims a row with a conditional `UPDATE ... WHERE status = 'queued'`, so multiple worker replicas polling the same database cannot double-claim a run.
+- Each run has its own `max_attempts` (defaults to `PATCHPILOT_WORKER_MAX_ATTEMPTS`); transient failures are requeued with linear backoff (`PATCHPILOT_WORKER_RETRY_BACKOFF_SECONDS * attempts`) instead of being immediately reclaimable.
+- Runs that exhaust `max_attempts` move to a terminal `dead_letter` status instead of looping.
+- Redacted failure messages are stored in `last_error`/`summary` and shown on the run detail page.
+
+## Production Startup Checks
+
+Set `PATCHPILOT_PRODUCTION=true` to fail boot (`agent doctor`, `agent dashboard`, `agent worker`) instead of running with an unsafe configuration. Boot fails if any of the following are missing or unsafe:
+
+- `DATABASE_URL` pointing at PostgreSQL (no silent SQLite fallback)
+- `DASHBOARD_AUTH_ENABLED=true`
+- `DASHBOARD_SESSION_SECRET`
+- `DASHBOARD_SECURE_COOKIES=true`
+- `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` / `GITHUB_OAUTH_CALLBACK_URL` (and `GITHUB_OAUTH_MOCK_ENABLED` must be `false`)
+- `GITHUB_APP_ID` and a private key (`GITHUB_APP_PRIVATE_KEY` or `GITHUB_APP_PRIVATE_KEY_PATH`)
+- `GITHUB_APP_WEBHOOK_SECRET`
+- `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
+
+`POST /login` and `POST /api/runs` are rate limited per client IP (in-process, fixed
+window; see `agent/infrastructure/security/rate_limit.py`). Secret redaction
+(`agent/infrastructure/security/secrets.py`) masks GitHub tokens, private key blocks,
+Stripe secret/webhook keys, and generic `key=value`-shaped secrets before anything is
+persisted to `last_error`/logs.
+
+See `docs/PRODUCTION_CHECKLIST.md` before a real-user launch and `docs/BETA_TEST_PLAN.md`
+for a smoke-test script against real repositories.
+
 ## Evaluations
 
 Run an eval manifest:
@@ -343,6 +424,7 @@ Prices are USD per 1M input/output tokens.
 - `failed_tests`: retries exhausted with failing tests
 - `setup_failed`: install/setup command failed
 - `agent_error`: unexpected agent failure
+- `dead_letter`: worker exhausted `max_attempts` retrying a transient failure
 
 ## Known Limitations
 
