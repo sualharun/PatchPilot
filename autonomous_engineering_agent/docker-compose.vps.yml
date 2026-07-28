@@ -33,6 +33,7 @@ services:
     ports: !override []
     volumes: !override
       - /opt/patchpilot/runtime:/data
+      - /opt/patchpilot-secrets/github-app-private-key.pem:/run/secrets/github_app_private_key.pem:ro
 
   patchpilot-worker:
     restart: unless-stopped
@@ -41,12 +42,14 @@ services:
       PATCHPILOT_HOST_WORKSPACE_ROOT: /opt/patchpilot/runtime/workspaces
     volumes: !override
       - /opt/patchpilot/runtime:/data
+      - /opt/patchpilot-secrets/github-app-private-key.pem:/run/secrets/github_app_private_key.pem:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
   patchpilot-pr-worker:
     restart: unless-stopped
     volumes: !override
       - /opt/patchpilot/runtime:/data
+      - /opt/patchpilot-secrets/github-app-private-key.pem:/run/secrets/github_app_private_key.pem:ro
 
 volumes:
   caddy-data:
