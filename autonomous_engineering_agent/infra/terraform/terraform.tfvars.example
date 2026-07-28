@@ -1,0 +1,29 @@
+project_name = "patchpilot"
+region       = "local"
+
+patchpilot_image      = "patchpilot:latest"
+api_replicas          = 2
+pr_worker_replicas    = 2
+agent_worker_replicas = 1
+apply_workloads       = false
+
+github_webhook_secret      = "replace-me"
+github_token               = ""
+github_oauth_client_id     = "replace-me"
+github_oauth_client_secret = "replace-me"
+github_oauth_callback_url  = "https://app.example.com/auth/github/callback"
+github_app_install_url     = "https://github.com/apps/your-app/installations/new"
+github_app_id              = "replace-me"
+github_app_installation_id = "replace-me"
+github_app_private_key     = <<EOKEY
+-----BEGIN RSA PRIVATE KEY-----
+replace-me
+-----END RSA PRIVATE KEY-----
+EOKEY
+
+openai_api_key    = ""
+anthropic_api_key = ""
+
+dashboard_username       = "admin"
+dashboard_password       = "replace-me"
+dashboard_session_secret = "replace-me"

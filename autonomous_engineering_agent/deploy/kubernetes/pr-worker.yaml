@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: patchpilot-pr-worker
+  namespace: patchpilot
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: patchpilot-pr-worker
+  template:
+    metadata:
+      labels:
+        app: patchpilot-pr-worker
+    spec:
+      containers:
+        - name: pr-worker
+          image: patchpilot:latest
+          imagePullPolicy: IfNotPresent
+          command: ["agent", "pr-worker", "--limit", "1", "--loop", "--sleep-seconds", "5"]
+          envFrom:
+            - configMapRef:
+                name: patchpilot-config
+            - secretRef:
+                name: patchpilot-secrets
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import agent.pr_worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30

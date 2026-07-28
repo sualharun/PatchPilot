@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: patchpilot-config
+  namespace: patchpilot
+data:
+  DATABASE_URL: postgresql://patchpilot:patchpilot@postgres:5432/patchpilot
+  AGENT_LOGS_DIR: /data/logs
+  ARTIFACT_STORAGE_DIR: /data/artifacts
+  DASHBOARD_AUTH_ENABLED: "true"
+  DASHBOARD_SECURE_COOKIES: "true"
+  DASHBOARD_DEMO_DATA_ENABLED: "false"
+  PATCHPILOT_PRODUCTION: "true"
+  PATCHPILOT_WORKER_ID: k8s-agent-worker
+  PATCHPILOT_WORKER_LEASE_SECONDS: "900"
+  PATCHPILOT_WORKER_MAX_ATTEMPTS: "3"
+  KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+  KAFKA_PR_ANALYSIS_TOPIC: pr-analysis-jobs
+  KAFKA_CONSUMER_GROUP: patchpilot-pr-workers
+  PR_ANALYSIS_STATUS_CONTEXT: patchpilot/pr-analysis

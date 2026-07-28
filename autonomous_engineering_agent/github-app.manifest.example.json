@@ -1,0 +1,23 @@
+{
+  "name": "PatchPilot",
+  "url": "https://app.example.com",
+  "hook_attributes": {
+    "url": "https://app.example.com/webhooks/github"
+  },
+  "redirect_url": "https://app.example.com/auth/github/callback",
+  "callback_urls": [
+    "https://app.example.com/auth/github/callback"
+  ],
+  "public": false,
+  "default_permissions": {
+    "contents": "write",
+    "issues": "read",
+    "metadata": "read",
+    "pull_requests": "write"
+  },
+  "default_events": [
+    "issues",
+    "pull_request"
+  ],
+  "request_oauth_on_install": false
+}

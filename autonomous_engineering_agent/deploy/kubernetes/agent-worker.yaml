@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: patchpilot-agent-worker
+  namespace: patchpilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: patchpilot-agent-worker
+  template:
+    metadata:
+      labels:
+        app: patchpilot-agent-worker
+    spec:
+      containers:
+        - name: worker
+          image: patchpilot:latest
+          imagePullPolicy: IfNotPresent
+          command: ["agent", "worker", "--limit", "1", "--loop", "--sleep-seconds", "5"]
+          envFrom:
+            - configMapRef:
+                name: patchpilot-config
+            - secretRef:
+                name: patchpilot-secrets
+          env:
+            - name: PATCHPILOT_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import agent.worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30

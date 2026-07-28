@@ -1,0 +1,53 @@
+services:
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      patchpilot:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PATCHPILOT_DOMAIN: ${PATCHPILOT_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  redpanda:
+    restart: unless-stopped
+    ports: !override []
+
+  postgres:
+    restart: unless-stopped
+    ports: !override []
+
+  patchpilot-migrate:
+    volumes: !override
+      - /opt/patchpilot/runtime:/data
+
+  patchpilot:
+    restart: unless-stopped
+    ports: !override []
+    volumes: !override
+      - /opt/patchpilot/runtime:/data
+
+  patchpilot-worker:
+    restart: unless-stopped
+    environment:
+      PATCHPILOT_WORKSPACE_ROOT: /data/workspaces
+      PATCHPILOT_HOST_WORKSPACE_ROOT: /opt/patchpilot/runtime/workspaces
+    volumes: !override
+      - /opt/patchpilot/runtime:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  patchpilot-pr-worker:
+    restart: unless-stopped
+    volumes: !override
+      - /opt/patchpilot/runtime:/data
+
+volumes:
+  caddy-data:
+  caddy-config:

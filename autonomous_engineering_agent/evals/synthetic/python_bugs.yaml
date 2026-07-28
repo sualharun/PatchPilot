@@ -1,0 +1,633 @@
+tasks:
+  - name: arithmetic-addition
+    issue_number: 1
+    repo_name: arithmetic_addition
+    title: add() subtracts instead of adding
+    body: calc.py returns the wrong value for add(2, 3). Fix the implementation.
+    files:
+      calc.py: |
+        def add(a, b):
+            return a - b
+      test_calc.py: |
+        import unittest
+        from calc import add
+
+        class CalcTests(unittest.TestCase):
+            def test_add(self):
+                self.assertEqual(add(2, 3), 5)
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/calc.py b/calc.py
+      --- a/calc.py
+      +++ b/calc.py
+      @@ -1,2 +1,2 @@
+       def add(a, b):
+      -    return a - b
+      +    return a + b
+
+  - name: slug-normalization
+    issue_number: 2
+    repo_name: slug_normalization
+    title: slugify leaves spaces in output
+    body: text.py should normalize repeated whitespace into hyphens and lowercase output.
+    files:
+      text.py: |
+        def slugify(value):
+            return value.strip().lower()
+      test_text.py: |
+        import unittest
+        from text import slugify
+
+        class TextTests(unittest.TestCase):
+            def test_slugify(self):
+                self.assertEqual(slugify(" Hello   World "), "hello-world")
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/text.py b/text.py
+      --- a/text.py
+      +++ b/text.py
+      @@ -1,2 +1,4 @@
+      +import re
+      +
+       def slugify(value):
+      -    return value.strip().lower()
+      +    return re.sub(r"\s+", "-", value.strip().lower())
+
+  - name: list-total
+    issue_number: 3
+    repo_name: list_total
+    title: total() ignores the final item
+    body: stats.py returns a sum that skips the last list element.
+    files:
+      stats.py: |
+        def total(values):
+            return sum(values[:-1])
+      test_stats.py: |
+        import unittest
+        from stats import total
+
+        class StatsTests(unittest.TestCase):
+            def test_total(self):
+                self.assertEqual(total([1, 2, 3]), 6)
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/stats.py b/stats.py
+      --- a/stats.py
+      +++ b/stats.py
+      @@ -1,2 +1,2 @@
+       def total(values):
+      -    return sum(values[:-1])
+      +    return sum(values)
+
+  - name: none-safe-username
+    issue_number: 4
+    repo_name: none_safe_username
+    title: display_name crashes when first name is missing
+    body: users.py should build a display name when either first or last name is None.
+    files:
+      users.py: |
+        def display_name(first, last):
+            return f"{first.strip()} {last.strip()}".strip()
+      test_users.py: |
+        import unittest
+        from users import display_name
+
+        class UserTests(unittest.TestCase):
+            def test_missing_first(self):
+                self.assertEqual(display_name(None, "Rivera"), "Rivera")
+            def test_missing_last(self):
+                self.assertEqual(display_name("Sam", None), "Sam")
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/users.py b/users.py
+      --- a/users.py
+      +++ b/users.py
+      @@ -1,2 +1,4 @@
+       def display_name(first, last):
+      -    return f"{first.strip()} {last.strip()}".strip()
+      +    first = (first or "").strip()
+      +    last = (last or "").strip()
+      +    return f"{first} {last}".strip()
+
+  - name: retry-inclusive-attempts
+    issue_number: 5
+    repo_name: retry_inclusive_attempts
+    title: retry loop runs one extra attempt
+    body: retry.py should call the operation exactly max_attempts times.
+    files:
+      retry.py: |
+        def attempts(max_attempts):
+            return list(range(max_attempts + 1))
+      test_retry.py: |
+        import unittest
+        from retry import attempts
+
+        class RetryTests(unittest.TestCase):
+            def test_attempt_count(self):
+                self.assertEqual(attempts(3), [0, 1, 2])
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/retry.py b/retry.py
+      --- a/retry.py
+      +++ b/retry.py
+      @@ -1,2 +1,2 @@
+       def attempts(max_attempts):
+      -    return list(range(max_attempts + 1))
+      +    return list(range(max_attempts))
+
+  - name: config-env-bool
+    issue_number: 6
+    repo_name: config_env_bool
+    title: bool parser treats "false" as enabled
+    body: config.py should parse false-like strings as False.
+    files:
+      config.py: |
+        def env_bool(value):
+            return bool(value)
+      test_config.py: |
+        import unittest
+        from config import env_bool
+
+        class ConfigTests(unittest.TestCase):
+            def test_false_strings(self):
+                self.assertFalse(env_bool("false"))
+                self.assertFalse(env_bool("0"))
+            def test_true_strings(self):
+                self.assertTrue(env_bool("true"))
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/config.py b/config.py
+      --- a/config.py
+      +++ b/config.py
+      @@ -1,2 +1,2 @@
+       def env_bool(value):
+      -    return bool(value)
+      +    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+  - name: pagination-offset
+    issue_number: 7
+    repo_name: pagination_offset
+    title: second page repeats first item
+    body: pagination.py uses one-based page math incorrectly.
+    files:
+      pagination.py: |
+        def page_items(items, page, size):
+            start = (page - 1) * size - 1
+            return items[start:start + size]
+      test_pagination.py: |
+        import unittest
+        from pagination import page_items
+
+        class PaginationTests(unittest.TestCase):
+            def test_second_page(self):
+                self.assertEqual(page_items([1, 2, 3, 4, 5], 2, 2), [3, 4])
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/pagination.py b/pagination.py
+      --- a/pagination.py
+      +++ b/pagination.py
+      @@ -1,3 +1,3 @@
+       def page_items(items, page, size):
+      -    start = (page - 1) * size - 1
+      +    start = (page - 1) * size
+           return items[start:start + size]
+
+  - name: cache-key-sorting
+    issue_number: 8
+    repo_name: cache_key_sorting
+    title: cache keys differ for equivalent dict order
+    body: cache.py should produce stable keys for dictionaries with the same entries.
+    files:
+      cache.py: |
+        def cache_key(params):
+            return ",".join(f"{key}={value}" for key, value in params.items())
+      test_cache.py: |
+        import unittest
+        from cache import cache_key
+
+        class CacheTests(unittest.TestCase):
+            def test_key_order_is_stable(self):
+                self.assertEqual(cache_key({"b": 2, "a": 1}), "a=1,b=2")
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/cache.py b/cache.py
+      --- a/cache.py
+      +++ b/cache.py
+      @@ -1,2 +1,2 @@
+       def cache_key(params):
+      -    return ",".join(f"{key}={value}" for key, value in params.items())
+      +    return ",".join(f"{key}={value}" for key, value in sorted(params.items()))
+
+  - name: date-window-inclusive
+    issue_number: 9
+    repo_name: date_window_inclusive
+    title: date range excludes end date
+    body: dates.py should include both start and end dates in the returned list.
+    files:
+      dates.py: |
+        from datetime import timedelta
+
+        def date_range(start, end):
+            days = []
+            current = start
+            while current < end:
+                days.append(current)
+                current += timedelta(days=1)
+            return days
+      test_dates.py: |
+        import unittest
+        from datetime import date
+        from dates import date_range
+
+        class DateTests(unittest.TestCase):
+            def test_inclusive(self):
+                self.assertEqual(date_range(date(2026, 1, 1), date(2026, 1, 2)), [date(2026, 1, 1), date(2026, 1, 2)])
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/dates.py b/dates.py
+      --- a/dates.py
+      +++ b/dates.py
+      @@ -3,7 +3,7 @@ from datetime import timedelta
+       def date_range(start, end):
+           days = []
+           current = start
+      -    while current < end:
+      +    while current <= end:
+               days.append(current)
+               current += timedelta(days=1)
+           return days
+
+  - name: status-normalization
+    issue_number: 10
+    repo_name: status_normalization
+    title: status parser is case sensitive
+    body: status.py should accept status values regardless of case and surrounding spaces.
+    files:
+      status.py: |
+        def normalize_status(value):
+            allowed = {"queued", "running", "success"}
+            if value not in allowed:
+                raise ValueError(value)
+            return value
+      test_status.py: |
+        import unittest
+        from status import normalize_status
+
+        class StatusTests(unittest.TestCase):
+            def test_normalized_status(self):
+                self.assertEqual(normalize_status(" Success "), "success")
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/status.py b/status.py
+      --- a/status.py
+      +++ b/status.py
+      @@ -1,6 +1,7 @@
+       def normalize_status(value):
+           allowed = {"queued", "running", "success"}
+      -    if value not in allowed:
+      -        raise ValueError(value)
+      -    return value
+      +    normalized = value.strip().lower()
+      +    if normalized not in allowed:
+      +        raise ValueError(value)
+      +    return normalized
+
+  - name: redact-token-case
+    issue_number: 11
+    repo_name: redact_token_case
+    title: redaction misses uppercase token key
+    body: redact.py should mask token values even when the key is uppercase.
+    files:
+      redact.py: |
+        import re
+
+        def redact(text):
+            return re.sub(r"token=[^ ]+", "token=***", text)
+      test_redact.py: |
+        import unittest
+        from redact import redact
+
+        class RedactTests(unittest.TestCase):
+            def test_uppercase_token(self):
+                self.assertEqual(redact("TOKEN=abc123 ok"), "TOKEN=*** ok")
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/redact.py b/redact.py
+      --- a/redact.py
+      +++ b/redact.py
+      @@ -1,4 +1,4 @@
+       import re
+       
+       def redact(text):
+      -    return re.sub(r"token=[^ ]+", "token=***", text)
+      +    return re.sub(r"(token=)[^ ]+", r"\1***", text, flags=re.IGNORECASE)
+
+  - name: path-traversal-check
+    issue_number: 12
+    repo_name: path_traversal_check
+    title: path guard allows sibling escape
+    body: paths.py should reject paths that resolve outside the repository root.
+    files:
+      paths.py: |
+        from pathlib import Path
+
+        def inside(root, candidate):
+            return str(Path(candidate).resolve()).startswith(str(Path(root).resolve()))
+      test_paths.py: |
+        import tempfile
+        import unittest
+        from pathlib import Path
+        from paths import inside
+
+        class PathTests(unittest.TestCase):
+            def test_sibling_prefix_escape(self):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp) / "repo"
+                    root.mkdir()
+                    sibling = Path(tmp) / "repo-other" / "file.py"
+                    sibling.parent.mkdir()
+                    sibling.write_text("")
+                    self.assertFalse(inside(root, sibling))
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/paths.py b/paths.py
+      --- a/paths.py
+      +++ b/paths.py
+      @@ -1,4 +1,7 @@
+       from pathlib import Path
+       
+       def inside(root, candidate):
+      -    return str(Path(candidate).resolve()).startswith(str(Path(root).resolve()))
+      +    root_path = Path(root).resolve()
+      +    candidate_path = Path(candidate).resolve()
+      +    return candidate_path == root_path or root_path in candidate_path.parents
+
+  - name: csv-header-trim
+    issue_number: 13
+    repo_name: csv_header_trim
+    title: CSV headers keep whitespace
+    body: csvutil.py should trim header names before building dictionaries.
+    files:
+      csvutil.py: |
+        def row_dict(headers, values):
+            return dict(zip(headers, values))
+      test_csvutil.py: |
+        import unittest
+        from csvutil import row_dict
+
+        class CsvTests(unittest.TestCase):
+            def test_trimmed_headers(self):
+                self.assertEqual(row_dict([" name ", "age"], ["Alex", "30"]), {"name": "Alex", "age": "30"})
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/csvutil.py b/csvutil.py
+      --- a/csvutil.py
+      +++ b/csvutil.py
+      @@ -1,2 +1,2 @@
+       def row_dict(headers, values):
+      -    return dict(zip(headers, values))
+      +    return dict(zip([header.strip() for header in headers], values))
+
+  - name: http-timeout-default
+    issue_number: 14
+    repo_name: http_timeout_default
+    title: HTTP helper ignores configured timeout
+    body: http.py should pass the timeout argument through to the client.
+    files:
+      http.py: |
+        def fetch(client, url, timeout=5):
+            return client.get(url)
+      test_http.py: |
+        import unittest
+        from http import fetch
+
+        class Client:
+            def __init__(self):
+                self.timeout = None
+            def get(self, url, timeout=None):
+                self.timeout = timeout
+                return url
+
+        class HttpTests(unittest.TestCase):
+            def test_timeout_passed(self):
+                client = Client()
+                fetch(client, "https://example.test", timeout=7)
+                self.assertEqual(client.timeout, 7)
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/http.py b/http.py
+      --- a/http.py
+      +++ b/http.py
+      @@ -1,2 +1,2 @@
+       def fetch(client, url, timeout=5):
+      -    return client.get(url)
+      +    return client.get(url, timeout=timeout)
+
+  - name: merge-deduplicate
+    issue_number: 15
+    repo_name: merge_deduplicate
+    title: merged IDs contain duplicates
+    body: merge.py should preserve order while removing duplicate IDs.
+    files:
+      merge.py: |
+        def merge_ids(left, right):
+            return left + right
+      test_merge.py: |
+        import unittest
+        from merge import merge_ids
+
+        class MergeTests(unittest.TestCase):
+            def test_deduplicates(self):
+                self.assertEqual(merge_ids([1, 2], [2, 3]), [1, 2, 3])
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/merge.py b/merge.py
+      --- a/merge.py
+      +++ b/merge.py
+      @@ -1,2 +1,7 @@
+       def merge_ids(left, right):
+      -    return left + right
+      +    merged = []
+      +    for value in left + right:
+      +        if value not in merged:
+      +            merged.append(value)
+      +    return merged
+
+  - name: rate-limit-zero
+    issue_number: 16
+    repo_name: rate_limit_zero
+    title: rate limiter divides by zero
+    body: rate.py should treat a limit of zero as no allowed requests.
+    files:
+      rate.py: |
+        def remaining(limit, used):
+            return limit - (used % limit)
+      test_rate.py: |
+        import unittest
+        from rate import remaining
+
+        class RateTests(unittest.TestCase):
+            def test_zero_limit(self):
+                self.assertEqual(remaining(0, 10), 0)
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/rate.py b/rate.py
+      --- a/rate.py
+      +++ b/rate.py
+      @@ -1,2 +1,4 @@
+       def remaining(limit, used):
+      +    if limit <= 0:
+      +        return 0
+           return limit - (used % limit)
+
+  - name: email-lowercase-domain
+    issue_number: 17
+    repo_name: email_lowercase_domain
+    title: email normalizer leaves uppercase domain
+    body: emailer.py should lowercase only the domain part while preserving the local part.
+    files:
+      emailer.py: |
+        def normalize_email(value):
+            return value.strip()
+      test_emailer.py: |
+        import unittest
+        from emailer import normalize_email
+
+        class EmailTests(unittest.TestCase):
+            def test_domain_lowercase(self):
+                self.assertEqual(normalize_email("User@EXAMPLE.COM "), "User@example.com")
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/emailer.py b/emailer.py
+      --- a/emailer.py
+      +++ b/emailer.py
+      @@ -1,2 +1,5 @@
+       def normalize_email(value):
+      -    return value.strip()
+      +    local, _, domain = value.strip().partition("@")
+      +    if not domain:
+      +        return local
+      +    return f"{local}@{domain.lower()}"
+
+  - name: json-default-list
+    issue_number: 18
+    repo_name: json_default_list
+    title: JSON parser returns None instead of empty list
+    body: parser.py should return an empty list when no JSON payload is provided.
+    files:
+      parser.py: |
+        import json
+
+        def parse_items(payload):
+            return json.loads(payload)
+      test_parser.py: |
+        import unittest
+        from parser import parse_items
+
+        class ParserTests(unittest.TestCase):
+            def test_empty_payload(self):
+                self.assertEqual(parse_items(""), [])
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/parser.py b/parser.py
+      --- a/parser.py
+      +++ b/parser.py
+      @@ -1,4 +1,6 @@
+       import json
+       
+       def parse_items(payload):
+      +    if not payload:
+      +        return []
+           return json.loads(payload)
+
+  - name: duration-negative
+    issue_number: 19
+    repo_name: duration_negative
+    title: duration formatting shows negative seconds
+    body: duration.py should clamp negative runtime values to zero.
+    files:
+      duration.py: |
+        def format_seconds(seconds):
+            return f"{seconds}s"
+      test_duration.py: |
+        import unittest
+        from duration import format_seconds
+
+        class DurationTests(unittest.TestCase):
+            def test_negative_clamped(self):
+                self.assertEqual(format_seconds(-3), "0s")
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/duration.py b/duration.py
+      --- a/duration.py
+      +++ b/duration.py
+      @@ -1,2 +1,3 @@
+       def format_seconds(seconds):
+      +    seconds = max(0, seconds)
+           return f"{seconds}s"
+
+  - name: permissions-admin-check
+    issue_number: 20
+    repo_name: permissions_admin_check
+    title: admin permission check misses owner role
+    body: permissions.py should allow both admin and owner roles.
+    files:
+      permissions.py: |
+        def can_manage(role):
+            return role == "admin"
+      test_permissions.py: |
+        import unittest
+        from permissions import can_manage
+
+        class PermissionTests(unittest.TestCase):
+            def test_owner_can_manage(self):
+                self.assertTrue(can_manage("owner"))
+
+        if __name__ == "__main__":
+            unittest.main()
+    patch: |
+      diff --git a/permissions.py b/permissions.py
+      --- a/permissions.py
+      +++ b/permissions.py
+      @@ -1,2 +1,2 @@
+       def can_manage(role):
+      -    return role == "admin"
+      +    return role in {"admin", "owner"}

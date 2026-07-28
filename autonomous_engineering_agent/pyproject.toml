@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonomous-engineering-agent"
+version = "0.1.0"
+description = "A scoped autonomous engineering agent for Python GitHub issues."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "anthropic>=0.34.0",
+  "fastapi>=0.115.0",
+  "openai>=1.40.0",
+  "psycopg[binary]>=3.2.0",
+  "PyGithub>=2.3.0",
+  "PyJWT>=2.9.0",
+  "kafka-python>=2.0.2",
+  "python-multipart>=0.0.9",
+  "python-dotenv>=1.0.1",
+  "PyYAML>=6.0.2",
+  "requests>=2.32.0",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+  "mypy>=1.11.0",
+  "types-PyYAML>=6.0.0",
+  "types-requests>=2.32.0",
+]
+
+[project.scripts]
+agent = "agent.interfaces.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent*"]
+
+[tool.setuptools.package-data]
+agent = ["static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]

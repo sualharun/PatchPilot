@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: patchpilot-api
+  namespace: patchpilot
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: patchpilot-api
+  template:
+    metadata:
+      labels:
+        app: patchpilot-api
+    spec:
+      containers:
+        - name: api
+          image: patchpilot:latest
+          imagePullPolicy: IfNotPresent
+          command: ["agent", "dashboard", "--host", "0.0.0.0", "--port", "8080"]
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: patchpilot-config
+            - secretRef:
+                name: patchpilot-secrets
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: patchpilot-api
+  namespace: patchpilot
+spec:
+  selector:
+    app: patchpilot-api
+  ports:
+    - port: 80
+      targetPort: 8080
