@@ -63,6 +63,7 @@ class AgentConfig:
     github_app_private_key: str | None = None
     github_app_private_key_path: Path | None = None
     github_app_installation_id: str | None = None
+    github_app_webhook_secret: str | None = None
     artifact_storage_dir: Path = Path(".agent-artifacts")
     worker_id: str = "local-worker"
     worker_lease_seconds: int = 900
@@ -163,6 +164,7 @@ def load_config(repo_path: Path | None = None, env_file: Path | None = None) -> 
         github_app_private_key=os.getenv("GITHUB_APP_PRIVATE_KEY"),
         github_app_private_key_path=_optional_path(os.getenv("GITHUB_APP_PRIVATE_KEY_PATH")),
         github_app_installation_id=os.getenv("GITHUB_APP_INSTALLATION_ID"),
+        github_app_webhook_secret=os.getenv("GITHUB_APP_WEBHOOK_SECRET"),
         artifact_storage_dir=Path(os.getenv("ARTIFACT_STORAGE_DIR", ".agent-artifacts")),
         worker_id=os.getenv("PATCHPILOT_WORKER_ID", "local-worker"),
         worker_lease_seconds=int(os.getenv("PATCHPILOT_WORKER_LEASE_SECONDS", 900)),

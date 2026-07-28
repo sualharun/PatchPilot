@@ -110,38 +110,25 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/webhooks/github")
     async def github_webhook(request: Request):
-        body = await request.body()
         if not config.github_webhook_secret:
             raise HTTPException(status_code=500, detail="GITHUB_WEBHOOK_SECRET is not configured")
-        if not verify_github_signature(
+        return await _handle_pull_request_webhook(
+            request=request,
             secret=config.github_webhook_secret,
-            body=body,
-            signature_header=request.headers.get("X-Hub-Signature-256"),
-        ):
-            raise HTTPException(status_code=401, detail="invalid GitHub webhook signature")
-        event = request.headers.get("X-GitHub-Event", "")
-        delivery_id = request.headers.get("X-GitHub-Delivery", "")
-        if event != "pull_request":
-            return JSONResponse({"status": "ignored", "event": event}, status_code=202)
-        try:
-            payload = json.loads(body.decode("utf-8"))
-            job = EnqueuePullRequestAnalysisHandler(
-                KafkaPRJobProducer(config),
-                container.audit_log,
-                SystemClock(),
-            ).execute(EnqueuePullRequestAnalysisCommand(payload=payload, delivery_id=delivery_id))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if job is None:
-            return JSONResponse({"status": "ignored", "event": event}, status_code=202)
-        return JSONResponse(
-            {
-                "status": "queued",
-                "topic": config.kafka_pr_analysis_topic,
-                "repo": job.full_name,
-                "pr_number": job.pr_number,
-            },
-            status_code=202,
+            config=config,
+            audit_log=container.audit_log,
+        )
+
+    @app.post("/webhooks/github-app")
+    async def github_app_webhook(request: Request):
+        secret = config.github_app_webhook_secret or config.github_webhook_secret
+        if not secret:
+            raise HTTPException(status_code=500, detail="GITHUB_APP_WEBHOOK_SECRET is not configured")
+        return await _handle_pull_request_webhook(
+            request=request,
+            secret=secret,
+            config=config,
+            audit_log=container.audit_log,
         )
 
     @app.post("/api/runs")
@@ -759,6 +746,40 @@ def serve_dashboard(host: str, port: int, database_url: str | None = None) -> No
     import uvicorn
 
     uvicorn.run(create_app(database_url), host=host, port=port)
+
+
+async def _handle_pull_request_webhook(request: Request, *, secret: str, config, audit_log) -> JSONResponse:
+    body = await request.body()
+    if not verify_github_signature(
+        secret=secret,
+        body=body,
+        signature_header=request.headers.get("X-Hub-Signature-256"),
+    ):
+        raise HTTPException(status_code=401, detail="invalid GitHub webhook signature")
+    event = request.headers.get("X-GitHub-Event", "")
+    delivery_id = request.headers.get("X-GitHub-Delivery", "")
+    if event != "pull_request":
+        return JSONResponse({"status": "ignored", "event": event}, status_code=202)
+    try:
+        payload = json.loads(body.decode("utf-8"))
+        job = EnqueuePullRequestAnalysisHandler(
+            KafkaPRJobProducer(config),
+            audit_log,
+            SystemClock(),
+        ).execute(EnqueuePullRequestAnalysisCommand(payload=payload, delivery_id=delivery_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if job is None:
+        return JSONResponse({"status": "ignored", "event": event}, status_code=202)
+    return JSONResponse(
+        {
+            "status": "queued",
+            "topic": config.kafka_pr_analysis_topic,
+            "repo": job.full_name,
+            "pr_number": job.pr_number,
+        },
+        status_code=202,
+    )
 
 
 def _page(title: str, body: str, *, nav_active: str, show_top_nav: bool = True, body_class: str = "") -> str:
@@ -1588,6 +1609,7 @@ def _is_public_path(path: str) -> bool:
         or path == "/auth/github/start"
         or path == "/auth/github/callback"
         or path == "/webhooks/github"
+        or path == "/webhooks/github-app"
         or path == "/health"
         or path == "/ready"
         or path.startswith("/static/")
