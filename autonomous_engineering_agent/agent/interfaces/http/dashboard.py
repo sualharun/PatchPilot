@@ -157,6 +157,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 default_model=config.default_model,
                 open_pr=config.github_app_auto_open_pr,
                 trigger_label=config.github_app_trigger_label,
+                worker_max_attempts=config.worker_max_attempts,
             ),
             accounts=container.accounts,
             billing=container.billing,
@@ -192,6 +193,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 open_pr=open_pr == "true",
                 requested_by=_current_user(request, config),
                 workspace_id=workspace_id,
+                max_attempts=config.worker_max_attempts,
             )
         )
         container.billing.record_run(workspace_id, result.run_id)

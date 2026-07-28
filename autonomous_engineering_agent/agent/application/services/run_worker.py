@@ -13,6 +13,7 @@ class RunWorkerSettings:
     worker_id: str
     lease_seconds: int
     max_attempts: int
+    retry_backoff_seconds: int = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,25 +77,27 @@ class ProcessQueuedRunsHandler:
             except Exception as exc:
                 failed += 1
                 attempts = int(queued.get("attempts") or 1)
-                status = (
-                    RunStatus.AGENT_ERROR.value
-                    if attempts >= self._settings.max_attempts
-                    else RunStatus.QUEUED.value
-                )
+                row_max_attempts = int(queued.get("max_attempts") or self._settings.max_attempts)
                 safe_error = self._redactor.redact(str(exc))
-                self._runs.update_run(
-                    run_id,
-                    status=status,
-                    leased_until=None,
-                    worker_id=None,
-                    last_error=safe_error,
-                    summary=safe_error,
-                )
+                exhausted = attempts >= row_max_attempts
+                if exhausted:
+                    status = RunStatus.DEAD_LETTER.value
+                    self._runs.mark_dead_letter(run_id, error=safe_error)
+                else:
+                    status = RunStatus.QUEUED.value
+                    backoff = self._settings.retry_backoff_seconds * attempts
+                    self._runs.requeue_for_retry(run_id, backoff_seconds=backoff, error=safe_error)
                 self._audit_log.record_event(
                     actor="worker",
-                    event="run.failed",
+                    event="run.failed" if not exhausted else "run.dead_letter",
                     target=str(queued.get("issue_url") or run_id),
                     result=status,
-                    metadata={"run_id": run_id, "attempts": attempts, "error": safe_error},
+                    metadata={
+                        "run_id": run_id,
+                        "attempts": attempts,
+                        "max_attempts": row_max_attempts,
+                        "error": safe_error,
+                        "retrying": not exhausted,
+                    },
                 )
         return WorkerResult(processed=processed, succeeded=succeeded, failed=failed)

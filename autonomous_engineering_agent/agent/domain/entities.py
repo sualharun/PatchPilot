@@ -45,6 +45,7 @@ class QueuedRun:
     requested_by: str
     installation_id: str | None = None
     workspace_id: int | None = None
+    max_attempts: int = 3
     status: RunStatus = RunStatus.QUEUED
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)

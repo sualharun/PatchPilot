@@ -52,6 +52,7 @@ def process_queued_runs(config: AgentConfig, *, limit: int = 1) -> WorkerResult:
                 worker_id=config.worker_id,
                 lease_seconds=config.worker_lease_seconds,
                 max_attempts=config.worker_max_attempts,
+                retry_backoff_seconds=config.worker_retry_backoff_seconds,
             ),
         )
         return handler.execute(limit=limit)

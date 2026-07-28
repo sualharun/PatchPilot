@@ -9,6 +9,7 @@ class RunStatus(StrEnum):
     SETUP_FAILED = "setup_failed"
     AGENT_ERROR = "agent_error"
     PR_OPENED = "pr_opened"
+    DEAD_LETTER = "dead_letter"
 
     @property
     def is_success(self) -> bool:

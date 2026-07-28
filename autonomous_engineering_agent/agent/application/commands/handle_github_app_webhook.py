@@ -24,6 +24,7 @@ class GitHubAppWebhookSettings:
     max_iterations: int = 5
     open_pr: bool = True
     trigger_label: str = "patchpilot"
+    worker_max_attempts: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +202,7 @@ class HandleGitHubAppWebhookHandler:
                 requested_by=f"github-app:{sender}",
                 installation_id=installation_id,
                 workspace_id=workspace_id,
+                max_attempts=self._settings.worker_max_attempts,
             )
         )
         if self._billing is not None:

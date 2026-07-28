@@ -31,6 +31,7 @@ class SqlRunRepository:
                 open_pr=run.open_pr,
                 installation_id=run.installation_id,
                 workspace_id=run.workspace_id,
+                max_attempts=run.max_attempts,
                 commands=[],
                 tool_calls=[],
                 patches=[],
@@ -68,6 +69,12 @@ class SqlRunRepository:
             lease_seconds=lease_seconds,
             max_attempts=max_attempts,
         )
+
+    def requeue_for_retry(self, run_id: int, *, backoff_seconds: int, error: str) -> None:
+        self._store.requeue_for_retry(run_id, backoff_seconds=backoff_seconds, error=error)
+
+    def mark_dead_letter(self, run_id: int, *, error: str) -> None:
+        self._store.mark_dead_letter(run_id, error=error)
 
 
 class SqlAuditLog:

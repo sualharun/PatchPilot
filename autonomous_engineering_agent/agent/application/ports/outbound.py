@@ -38,6 +38,10 @@ class RunRepository(Protocol):
         max_attempts: int,
     ) -> dict[str, Any] | None: ...
 
+    def requeue_for_retry(self, run_id: int, *, backoff_seconds: int, error: str) -> None: ...
+
+    def mark_dead_letter(self, run_id: int, *, error: str) -> None: ...
+
 
 class AuditLog(Protocol):
     def record_event(

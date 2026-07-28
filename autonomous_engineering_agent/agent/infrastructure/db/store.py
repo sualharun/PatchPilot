@@ -34,6 +34,7 @@ class RunRecord:
     open_pr: bool = False
     installation_id: str | None = None
     workspace_id: int | None = None
+    max_attempts: int = 3
     queued_at: str | None = None
     leased_until: str | None = None
     worker_id: str | None = None
@@ -109,33 +110,64 @@ class RunStore:
             rows.append(_decode_run(data))
         return rows
 
-    def claim_next_queued_run(self, *, worker_id: str, lease_seconds: int, max_attempts: int) -> dict[str, Any] | None:
+    def claim_next_queued_run(
+        self, *, worker_id: str, lease_seconds: int, max_attempts: int, claim_attempts: int = 5
+    ) -> dict[str, Any] | None:
+        """Atomically claim one queued run, safe when multiple worker replicas poll concurrently.
+
+        A candidate row is selected, then claimed with a conditional UPDATE guarded by
+        ``status = 'queued'``. If a concurrent worker already claimed it, the UPDATE affects
+        zero rows and this retries against the next candidate instead of double-processing.
+        """
         now = _now()
         lease_until = _now(offset_seconds=lease_seconds)
-        cursor = self._execute(
-            """
-            SELECT * FROM runs
-            WHERE status = ?
-              AND attempts < ?
-              AND (leased_until IS NULL OR leased_until < ?)
-            ORDER BY id ASC
-            LIMIT 1
-            """,
-            ["queued", max_attempts, now],
+        for _ in range(max(1, claim_attempts)):
+            cursor = self._execute(
+                """
+                SELECT * FROM runs
+                WHERE status = ?
+                  AND attempts < COALESCE(max_attempts, ?)
+                  AND (leased_until IS NULL OR leased_until < ?)
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                ["queued", max_attempts, now],
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            columns = [description[0] for description in cursor.description]
+            data = _decode_run(dict(zip(columns, row, strict=True)))
+            run_id = int(data["id"])
+            attempts = int(data.get("attempts") or 0) + 1
+            started_at = data.get("started_at") or now
+            claim_cursor = self._execute(
+                "UPDATE runs SET status = ?, worker_id = ?, leased_until = ?, attempts = ?, started_at = ? "
+                "WHERE id = ? AND status = ?",
+                ["running", worker_id, lease_until, attempts, started_at, run_id, "queued"],
+            )
+            if (claim_cursor.rowcount or 0) < 1:
+                continue  # lost the race to another replica; try the next candidate
+            data["status"] = "running"
+            data["worker_id"] = worker_id
+            data["leased_until"] = lease_until
+            data["attempts"] = attempts
+            data["started_at"] = started_at
+            return data
+        return None
+
+    def requeue_for_retry(self, run_id: int, *, backoff_seconds: int, error: str) -> None:
+        self.update_run(
+            run_id,
+            status="queued",
+            worker_id=None,
+            leased_until=_now(offset_seconds=backoff_seconds),
+            last_error=error,
+            summary=error,
         )
-        row = cursor.fetchone()
-        if row is None:
-            return None
-        columns = [description[0] for description in cursor.description]
-        data = _decode_run(dict(zip(columns, row, strict=True)))
-        run_id = int(data["id"])
-        attempts = int(data.get("attempts") or 0) + 1
-        self.update_run(run_id, status="running", worker_id=worker_id, leased_until=lease_until, attempts=attempts)
-        data["status"] = "running"
-        data["worker_id"] = worker_id
-        data["leased_until"] = lease_until
-        data["attempts"] = attempts
-        return data
+
+    def mark_dead_letter(self, run_id: int, *, error: str) -> None:
+        self.finish_run(run_id, "dead_letter", worker_id=None, leased_until=None, last_error=error, summary=error)
 
     def add_audit_event(
         self,
@@ -739,6 +771,7 @@ class RunStore:
                 "open_pr": "INTEGER NOT NULL DEFAULT 0",
                 "installation_id": "TEXT",
                 "workspace_id": "INTEGER",
+                "max_attempts": "INTEGER NOT NULL DEFAULT 3",
                 "queued_at": "TEXT",
                 "leased_until": "TEXT",
                 "worker_id": "TEXT",

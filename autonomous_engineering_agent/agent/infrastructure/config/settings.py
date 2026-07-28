@@ -76,6 +76,7 @@ class AgentConfig:
     worker_id: str = "local-worker"
     worker_lease_seconds: int = 900
     worker_max_attempts: int = 3
+    worker_retry_backoff_seconds: int = 30
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_pr_analysis_topic: str = "pr-analysis-jobs"
     kafka_consumer_group: str = "patchpilot-pr-workers"
@@ -185,6 +186,7 @@ def load_config(repo_path: Path | None = None, env_file: Path | None = None) -> 
         worker_id=os.getenv("PATCHPILOT_WORKER_ID", "local-worker"),
         worker_lease_seconds=int(os.getenv("PATCHPILOT_WORKER_LEASE_SECONDS", 900)),
         worker_max_attempts=int(os.getenv("PATCHPILOT_WORKER_MAX_ATTEMPTS", 3)),
+        worker_retry_backoff_seconds=int(os.getenv("PATCHPILOT_WORKER_RETRY_BACKOFF_SECONDS", 30)),
         kafka_bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
         kafka_pr_analysis_topic=os.getenv("KAFKA_PR_ANALYSIS_TOPIC", "pr-analysis-jobs"),
         kafka_consumer_group=os.getenv("KAFKA_CONSUMER_GROUP", "patchpilot-pr-workers"),
