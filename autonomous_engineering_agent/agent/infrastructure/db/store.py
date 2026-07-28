@@ -533,6 +533,138 @@ class RunStore:
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
+    def upsert_stripe_customer(self, *, workspace_id: int, stripe_customer_id: str, email: str | None) -> int:
+        existing = self._fetch_one("SELECT * FROM stripe_customers WHERE workspace_id = ?", [workspace_id])
+        if existing:
+            self._execute(
+                "UPDATE stripe_customers SET stripe_customer_id = ?, email = ? WHERE workspace_id = ?",
+                [stripe_customer_id, email, workspace_id],
+            )
+            return int(existing["id"])
+        return self._insert_generic(
+            "stripe_customers",
+            {
+                "workspace_id": workspace_id,
+                "stripe_customer_id": stripe_customer_id,
+                "email": email,
+                "created_at": _now(),
+            },
+        )
+
+    def stripe_customer_for_workspace(self, workspace_id: int) -> dict[str, Any] | None:
+        return self._fetch_one("SELECT * FROM stripe_customers WHERE workspace_id = ?", [workspace_id])
+
+    def workspace_for_stripe_customer(self, stripe_customer_id: str) -> int | None:
+        row = self._fetch_one(
+            "SELECT workspace_id FROM stripe_customers WHERE stripe_customer_id = ?", [stripe_customer_id]
+        )
+        return int(row["workspace_id"]) if row else None
+
+    def upsert_subscription(
+        self,
+        *,
+        workspace_id: int,
+        stripe_subscription_id: str,
+        stripe_price_id: str | None,
+        plan: str,
+        status: str,
+        current_period_end: str | None = None,
+    ) -> int:
+        existing = self._fetch_one(
+            "SELECT * FROM subscriptions WHERE stripe_subscription_id = ?", [stripe_subscription_id]
+        )
+        if existing:
+            self._execute(
+                "UPDATE subscriptions SET workspace_id = ?, stripe_price_id = ?, plan = ?, status = ?, "
+                "current_period_end = ?, updated_at = ? WHERE stripe_subscription_id = ?",
+                [workspace_id, stripe_price_id, plan, status, current_period_end, _now(), stripe_subscription_id],
+            )
+            return int(existing["id"])
+        return self._insert_generic(
+            "subscriptions",
+            {
+                "workspace_id": workspace_id,
+                "stripe_subscription_id": stripe_subscription_id,
+                "stripe_price_id": stripe_price_id,
+                "plan": plan,
+                "status": status,
+                "current_period_end": current_period_end,
+                "created_at": _now(),
+            },
+        )
+
+    def subscription_for_workspace(self, workspace_id: int) -> dict[str, Any] | None:
+        return self._fetch_one(
+            "SELECT * FROM subscriptions WHERE workspace_id = ? ORDER BY id DESC LIMIT 1", [workspace_id]
+        )
+
+    def set_workspace_limits(
+        self,
+        *,
+        workspace_id: int,
+        plan: str,
+        monthly_run_cap: int | None = None,
+        monthly_spend_cap_usd: float | None = None,
+    ) -> None:
+        existing = self._fetch_one("SELECT * FROM workspace_limits WHERE workspace_id = ?", [workspace_id])
+        if existing:
+            self._execute(
+                "UPDATE workspace_limits SET plan = ?, monthly_run_cap = ?, monthly_spend_cap_usd = ?, "
+                "updated_at = ? WHERE workspace_id = ?",
+                [plan, monthly_run_cap, monthly_spend_cap_usd, _now(), workspace_id],
+            )
+        else:
+            self._insert_generic(
+                "workspace_limits",
+                {
+                    "workspace_id": workspace_id,
+                    "plan": plan,
+                    "monthly_run_cap": monthly_run_cap,
+                    "monthly_spend_cap_usd": monthly_spend_cap_usd,
+                    "updated_at": _now(),
+                },
+            )
+
+    def get_workspace_limits(self, workspace_id: int) -> dict[str, Any] | None:
+        return self._fetch_one("SELECT * FROM workspace_limits WHERE workspace_id = ?", [workspace_id])
+
+    def add_usage(
+        self,
+        *,
+        workspace_id: int | None,
+        run_id: int | None,
+        kind: str = "run",
+        amount: int = 1,
+        cost_usd: float | None = None,
+    ) -> int:
+        return self._insert_generic(
+            "usage_ledger",
+            {
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "kind": kind,
+                "amount": amount,
+                "cost_usd": cost_usd,
+                "created_at": _now(),
+            },
+        )
+
+    def usage_this_month(self, workspace_id: int | None) -> dict[str, Any]:
+        month_start = datetime.now(UTC).strftime("%Y-%m-01")
+        if workspace_id is None:
+            row = self._execute(
+                "SELECT COALESCE(SUM(amount), 0), COALESCE(SUM(cost_usd), 0) FROM usage_ledger "
+                "WHERE kind = 'run' AND created_at >= ?",
+                [month_start],
+            ).fetchone()
+        else:
+            row = self._execute(
+                "SELECT COALESCE(SUM(amount), 0), COALESCE(SUM(cost_usd), 0) FROM usage_ledger "
+                "WHERE kind = 'run' AND created_at >= ? AND workspace_id = ?",
+                [month_start, workspace_id],
+            ).fetchone()
+        return {"runs": int(row[0] or 0), "cost_usd": float(row[1] or 0.0)}
+
     def add_eval_report(
         self,
         *,
@@ -946,6 +1078,61 @@ class RunStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS stripe_customers (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL UNIQUE,
+              stripe_customer_id TEXT NOT NULL UNIQUE,
+              email TEXT,
+              created_at TEXT NOT NULL
+            )
+            """,
+            [],
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL,
+              stripe_subscription_id TEXT NOT NULL UNIQUE,
+              stripe_price_id TEXT,
+              plan TEXT NOT NULL DEFAULT 'free',
+              status TEXT NOT NULL DEFAULT 'trialing',
+              current_period_end TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT
+            )
+            """,
+            [],
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_ledger (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER,
+              run_id INTEGER,
+              kind TEXT NOT NULL DEFAULT 'run',
+              amount INTEGER NOT NULL DEFAULT 1,
+              cost_usd REAL,
+              created_at TEXT NOT NULL
+            )
+            """,
+            [],
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_limits (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL UNIQUE,
+              plan TEXT NOT NULL DEFAULT 'free',
+              monthly_run_cap INTEGER,
+              monthly_spend_cap_usd REAL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            [],
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS workspace_settings (
               id INTEGER PRIMARY KEY,
               workspace_id INTEGER NOT NULL,
@@ -977,6 +1164,8 @@ class RunStore:
             "CREATE INDEX IF NOT EXISTS idx_usage_events_workspace ON usage_events(workspace_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_eval_reports_created_at ON eval_reports(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_app_repos_full_name ON github_app_repositories(full_name, status)",
+            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_workspace ON usage_ledger(workspace_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_subscriptions_workspace ON subscriptions(workspace_id)",
             "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received ON webhook_deliveries(received_at)",
         ):
             self._execute(statement, [])

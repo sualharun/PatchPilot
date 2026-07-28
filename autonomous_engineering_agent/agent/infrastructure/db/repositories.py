@@ -243,6 +243,28 @@ class SqlGitHubAppRepository:
         return self._store.list_github_app_repositories(installation_id)
 
 
+class SqlBillingRepository:
+    """RunStore already implements the billing methods; this keeps the port boundary explicit."""
+
+    def __init__(self, store: RunStore) -> None:
+        self._store = store
+
+    def __getattr__(self, name: str):
+        if name in {
+            "upsert_stripe_customer",
+            "stripe_customer_for_workspace",
+            "workspace_for_stripe_customer",
+            "upsert_subscription",
+            "subscription_for_workspace",
+            "set_workspace_limits",
+            "get_workspace_limits",
+            "add_usage",
+            "usage_this_month",
+        }:
+            return getattr(self._store, name)
+        raise AttributeError(name)
+
+
 class SqlEvalReportRepository:
     def __init__(self, store: RunStore) -> None:
         self._store = store

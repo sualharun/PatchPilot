@@ -32,6 +32,7 @@ from agent.infrastructure.clock import SystemClock
 from agent.infrastructure.config.settings import load_config
 from agent.infrastructure.kafka import KafkaPRJobProducer
 from agent.infrastructure.security import verify_github_signature
+from agent.infrastructure.stripe import StripeClient, verify_stripe_signature
 
 SESSION_COOKIE = "patchpilot_session"
 SESSION_TTL_SECONDS = 60 * 60 * 12
@@ -157,6 +158,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 open_pr=config.github_app_auto_open_pr,
                 trigger_label=config.github_app_trigger_label,
             ),
+            accounts=container.accounts,
+            billing=container.billing,
         )
         try:
             result = handler.execute(
@@ -177,6 +180,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
         csrf_token: str = Form(""),
     ):
         _require_csrf(request, config, csrf_token)
+        workspace_id = _request_workspace_id(request, config, queries)
+        decision = container.billing.check_run_allowed(workspace_id)
+        if not decision.allowed:
+            return RedirectResponse(f"/billing?limit={_escape_attr(decision.reason)}", status_code=303)
         result = container.queue_run.execute(
             QueueRunCommand(
                 issue=parse_issue_ref(issue),
@@ -184,10 +191,73 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 max_iterations=max_iterations,
                 open_pr=open_pr == "true",
                 requested_by=_current_user(request, config),
-                workspace_id=_request_workspace_id(request, config, queries),
+                workspace_id=workspace_id,
             )
         )
+        container.billing.record_run(workspace_id, result.run_id)
         return RedirectResponse(f"/runs/{result.run_id}", status_code=303)
+
+    @app.post("/billing/checkout")
+    def billing_checkout(request: Request, plan: str = Form(...), csrf_token: str = Form("")):
+        _require_csrf(request, config, csrf_token)
+        if not config.stripe_secret_key:
+            raise HTTPException(status_code=400, detail="STRIPE_SECRET_KEY is not configured")
+        price_id = config.stripe_price_id_pro if plan == "pro" else config.stripe_price_id_starter
+        if not price_id:
+            raise HTTPException(status_code=400, detail=f"Stripe price for plan '{plan}' is not configured")
+        workspace_id = _request_workspace_id(request, config, queries)
+        if workspace_id is None:
+            raise HTTPException(status_code=400, detail="no workspace for the current session")
+        account = queries.account(_session_login(request, config))
+        session = StripeClient(config.stripe_secret_key).create_checkout_session(
+            price_id=price_id,
+            workspace_id=workspace_id,
+            customer_email=str((account.get("user") or {}).get("email") or "") or None,
+            success_url=f"{config.public_base_url}/billing?checkout=success",
+            cancel_url=f"{config.public_base_url}/billing?checkout=canceled",
+        )
+        return RedirectResponse(str(session["url"]), status_code=303)
+
+    @app.post("/billing/portal")
+    def billing_portal(request: Request, csrf_token: str = Form("")):
+        _require_csrf(request, config, csrf_token)
+        if not config.stripe_secret_key:
+            raise HTTPException(status_code=400, detail="STRIPE_SECRET_KEY is not configured")
+        workspace_id = _request_workspace_id(request, config, queries)
+        customer = container.billing.stripe_customer(workspace_id)
+        if not customer:
+            return RedirectResponse("/billing?portal=no_customer", status_code=303)
+        session = StripeClient(config.stripe_secret_key).create_portal_session(
+            customer_id=str(customer["stripe_customer_id"]),
+            return_url=f"{config.public_base_url}/billing",
+        )
+        return RedirectResponse(str(session["url"]), status_code=303)
+
+    @app.post("/webhooks/stripe")
+    async def stripe_webhook(request: Request):
+        if not config.stripe_webhook_secret:
+            raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET is not configured")
+        body = await request.body()
+        if not verify_stripe_signature(
+            secret=config.stripe_webhook_secret,
+            payload=body,
+            signature_header=request.headers.get("Stripe-Signature"),
+        ):
+            raise HTTPException(status_code=401, detail="invalid Stripe webhook signature")
+        try:
+            event = json.loads(body.decode("utf-8"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON payload") from exc
+        result = container.handle_stripe_webhook.execute(event)
+        container.record_audit.execute(
+            RecordAuditCommand(
+                actor="stripe",
+                event=f"billing.webhook.{event.get('type', 'unknown')}",
+                target=f"workspace:{result.get('workspace_id', 'unknown')}",
+                result=str(result.get("status", "processed")),
+            )
+        )
+        return JSONResponse(result, status_code=200)
 
     @app.get("/", response_class=HTMLResponse)
     def hero():
@@ -753,7 +823,13 @@ E     + where False = &lt;Response [503]&gt;.ok
             "Billing",
             "Token usage, provider costs, run budgets, and workspace billing controls.",
             "billing",
-            _billing_content(queries.billing_overview(limit=500, workspace_id=workspace_id)),
+            _billing_content(
+                queries.billing_overview(limit=500, workspace_id=workspace_id),
+                plan_info=container.billing.overview(workspace_id),
+                csrf_token=_csrf_token(request, config),
+                stripe_enabled=bool(config.stripe_secret_key),
+                limit_notice=request.query_params.get("limit"),
+            ),
         )
 
     @app.get("/audit-log", response_class=HTMLResponse)
@@ -1175,22 +1251,55 @@ def _account_content(account: dict, csrf_token: str) -> str:
 """
 
 
-def _billing_content(overview: dict) -> str:
+def _billing_content(
+    overview: dict,
+    *,
+    plan_info: dict | None = None,
+    csrf_token: str = "",
+    stripe_enabled: bool = False,
+    limit_notice: str | None = None,
+) -> str:
     runs = overview["runs"]
     total_cost = overview["total_cost"]
     avg_cost = overview["average_cost"]
     by_model = overview["by_model"]
+    plan_info = plan_info or {}
+    plan = str(plan_info.get("plan") or "free")
+    runs_used = int(plan_info.get("runs_this_month") or 0)
+    run_cap = int(plan_info.get("monthly_run_cap") or 0)
+    subscription_status = str(plan_info.get("subscription_status") or "none")
+    notice = (
+        f'<section class="app-card"><p class="auth-error">Run blocked: {_escape_attr(limit_notice)}. '
+        "Upgrade your plan to queue more runs.</p></section>"
+        if limit_notice
+        else ""
+    )
+    upgrade_forms = (
+        f"""
+  <form method="post" action="/billing/checkout" style="display:inline"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="plan" value="starter"><button class="button outline" type="submit">Upgrade to Starter</button></form>
+  <form method="post" action="/billing/checkout" style="display:inline"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="plan" value="pro"><button class="button dark" type="submit">Upgrade to Pro</button></form>
+  <form method="post" action="/billing/portal" style="display:inline"><input type="hidden" name="csrf_token" value="{csrf_token}"><button class="button outline" type="submit">Manage subscription</button></form>
+"""
+        if stripe_enabled
+        else '<p class="fine-print">Stripe is not configured. Set STRIPE_SECRET_KEY and price IDs to enable upgrades.</p>'
+    )
     rows = "\n".join(
         f"<tr><td>{_escape_attr(model)}</td><td>{int(values['runs'])}</td><td>{int(values['tokens'])}</td>"
         f"<td>${values['cost']:.2f}</td><td>{(values['cost'] / total_cost * 100 if total_cost else 0):.1f}%</td></tr>"
         for model, values in sorted(by_model.items())
     ) or '<tr><td colspan="5">No cost data yet.</td></tr>'
     return f"""
+{notice}
 <section id="usage" class="app-metric-grid">
+  <article><span>Plan</span><strong>{_escape_attr(plan)}</strong><small>subscription: {_escape_attr(subscription_status)}</small></article>
+  <article><span>Runs this month</span><strong>{runs_used} / {run_cap}</strong><small>monthly run cap</small></article>
   <article><span>Total tracked</span><strong>${total_cost:.2f}</strong><small class="good">from persisted runs</small></article>
-  <article><span>Runs</span><strong>{len(runs)}</strong><small>cost-bearing history</small></article>
   <article><span>Avg/run</span><strong>${avg_cost:.2f}</strong><small>estimated provider cost</small></article>
-  <article><span>Budget</span><strong>env-driven</strong><small>configure provider-side alerts</small></article>
+</section>
+<section id="plan" class="app-card">
+  <header><h2>Subscription</h2></header>
+  <p>Current plan: <strong>{_escape_attr(plan)}</strong> · {runs_used} of {run_cap} runs used this month.</p>
+  {upgrade_forms}
 </section>
 <section id="models" class="app-card">
   <header><h2>Cost Breakdown by Model</h2></header>
@@ -1720,6 +1829,7 @@ def _is_public_path(path: str) -> bool:
         or path == "/auth/github/callback"
         or path == "/webhooks/github"
         or path == "/webhooks/github-app"
+        or path == "/webhooks/stripe"
         or path == "/health"
         or path == "/ready"
         or path.startswith("/static/")

@@ -18,6 +18,11 @@ from agent.application.commands.dashboard import (
 from agent.application.commands.handle_pr_webhook import EnqueuePullRequestAnalysisHandler
 from agent.application.commands.queue_run import QueueRunHandler
 from agent.application.queries.dashboard import DashboardQueryService
+from agent.application.services.billing import (
+    BillingService,
+    HandleStripeWebhookHandler,
+    StripeWebhookSettings,
+)
 from agent.config import AgentConfig, load_config
 from agent.github_client import GitHubClient
 from agent.infrastructure.artifacts import FilesystemArtifactCatalog
@@ -25,6 +30,7 @@ from agent.infrastructure.clock import SystemClock
 from agent.infrastructure.db.repositories import (
     SqlAccountRepository,
     SqlAuditLog,
+    SqlBillingRepository,
     SqlEvalReportRepository,
     SqlGitHubAppRepository,
     SqlGitHubConnectionRepository,
@@ -50,6 +56,8 @@ class ApplicationContainer:
     eval_reports: SqlEvalReportRepository
     github_app: SqlGitHubAppRepository
     webhook_deliveries: SqlWebhookDeliveryRepository
+    billing: BillingService
+    handle_stripe_webhook: HandleStripeWebhookHandler
     queue_run: QueueRunHandler
     enqueue_pr_analysis: EnqueuePullRequestAnalysisHandler
     record_audit: RecordAuditHandler
@@ -83,6 +91,7 @@ def build_application(
     eval_reports = SqlEvalReportRepository(store)
     github_app = SqlGitHubAppRepository(store)
     webhook_deliveries = SqlWebhookDeliveryRepository(store)
+    billing_repository = SqlBillingRepository(store)
     github = GitHubClient(settings.github_token)
     clock = SystemClock()
     queries = DashboardQueryService(
@@ -107,6 +116,14 @@ def build_application(
         eval_reports=eval_reports,
         github_app=github_app,
         webhook_deliveries=webhook_deliveries,
+        billing=BillingService(billing_repository),
+        handle_stripe_webhook=HandleStripeWebhookHandler(
+            billing_repository,
+            StripeWebhookSettings(
+                price_id_starter=settings.stripe_price_id_starter,
+                price_id_pro=settings.stripe_price_id_pro,
+            ),
+        ),
         queue_run=QueueRunHandler(runs, audit_log, clock),
         enqueue_pr_analysis=EnqueuePullRequestAnalysisHandler(KafkaPRJobProducer(settings), audit_log, clock),
         record_audit=RecordAuditHandler(audit_log),

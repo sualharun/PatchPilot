@@ -49,6 +49,8 @@ class HandleGitHubAppWebhookHandler:
         pr_analysis: EnqueuePullRequestAnalysisHandler | None,
         audit_log: AuditLog,
         settings: GitHubAppWebhookSettings,
+        accounts: Any | None = None,
+        billing: Any | None = None,
     ) -> None:
         self._deliveries = deliveries
         self._installations = installations
@@ -56,6 +58,8 @@ class HandleGitHubAppWebhookHandler:
         self._pr_analysis = pr_analysis
         self._audit_log = audit_log
         self._settings = settings
+        self._accounts = accounts
+        self._billing = billing
 
     def execute(self, command: GitHubAppWebhookCommand) -> GitHubAppWebhookResult:
         action = str(command.payload.get("action") or "")
@@ -175,6 +179,18 @@ class HandleGitHubAppWebhookHandler:
             return GitHubAppWebhookResult(
                 status="ignored", detail={"reason": "repository is not installed", "repo": issue.repository.full_name}
             )
+        workspace_id = self._workspace_for_installation(installation_id)
+        if self._billing is not None:
+            decision = self._billing.check_run_allowed(workspace_id)
+            if not decision.allowed:
+                self._audit_log.record_event(
+                    actor="github-app",
+                    event="run.limited",
+                    target=issue.url,
+                    result="limited",
+                    metadata={"reason": decision.reason, "workspace_id": workspace_id},
+                )
+                return GitHubAppWebhookResult(status="limited", detail={"reason": decision.reason})
         sender = str((payload.get("sender") or {}).get("login") or "github")
         result = self._queue_run.execute(
             QueueRunCommand(
@@ -184,12 +200,23 @@ class HandleGitHubAppWebhookHandler:
                 open_pr=self._settings.open_pr,
                 requested_by=f"github-app:{sender}",
                 installation_id=installation_id,
+                workspace_id=workspace_id,
             )
         )
+        if self._billing is not None:
+            self._billing.record_run(workspace_id, result.run_id)
         return GitHubAppWebhookResult(
             status="queued",
             detail={"run_id": result.run_id, "branch": result.branch, "installation_id": installation_id},
         )
+
+    def _workspace_for_installation(self, installation_id: str) -> int | None:
+        if self._accounts is None:
+            return None
+        installation = self._installations.get_installation(installation_id) or {}
+        workspace = self._accounts.workspace_for_login(installation.get("account_login"))
+        workspace_id = (workspace or {}).get("id")
+        return int(workspace_id) if workspace_id else None
 
     def _handle_pull_request(self, command: GitHubAppWebhookCommand) -> GitHubAppWebhookResult:
         if self._pr_analysis is None:
