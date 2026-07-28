@@ -1276,7 +1276,6 @@ def _billing_content(
     stripe_enabled: bool = False,
     limit_notice: str | None = None,
 ) -> str:
-    runs = overview["runs"]
     total_cost = overview["total_cost"]
     avg_cost = overview["average_cost"]
     by_model = overview["by_model"]

@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import hmac
 import json
@@ -222,12 +223,10 @@ def test_error_recorded_on_delivery(tmp_path):
         settings=GitHubAppWebhookSettings(),
     )
 
-    try:
+    with contextlib.suppress(RuntimeError):
         handler.execute(
             GitHubAppWebhookCommand(event="installation", delivery_id="d-err", payload=_installation_payload())
         )
-    except RuntimeError:
-        pass
 
     deliveries = store.list_webhook_deliveries()
     assert deliveries[0]["status"] == "error"

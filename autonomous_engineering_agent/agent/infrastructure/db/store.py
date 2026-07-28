@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -1246,10 +1247,8 @@ class RunStore:
         return int(cursor.lastrowid)
 
     def _rollback(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._conn.rollback()
-        except Exception:
-            pass
 
     def _fetch_one(self, sql: str, values: list[Any]) -> dict[str, Any] | None:
         cursor = self._execute(sql, values)

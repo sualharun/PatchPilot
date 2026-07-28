@@ -45,6 +45,39 @@ def test_create_github_app_jwt(monkeypatch):
     assert captured["algorithm"] == "RS256"
 
 
+def test_from_github_app_installation_exchanges_jwt_for_installation_token(monkeypatch):
+    monkeypatch.setattr("agent.infrastructure.github.client.create_github_app_jwt", lambda **kwargs: "app-jwt")
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"token": "installation-token-xyz"}
+
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+
+        def post(self, url, timeout):
+            captured["url"] = url
+            captured["authorization"] = self.headers.get("Authorization")
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr("agent.infrastructure.github.client.requests.Session", FakeSession)
+
+    client = GitHubClient.from_github_app_installation(
+        app_id="12345", private_key="fake-key", installation_id="99"
+    )
+
+    assert client.token == "installation-token-xyz"
+    assert captured["url"] == "https://api.github.com/app/installations/99/access_tokens"
+    assert captured["authorization"] == "Bearer app-jwt"
+
+
 def test_verify_repository_access_uses_repo_endpoint(monkeypatch):
     client = GitHubClient(token="token")
 
