@@ -14,6 +14,7 @@ GITHUB_ISSUE_RE = re.compile(r"github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issu
 SHORT_ISSUE_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^#\s]+)#(?P<number>\d+)$")
 SEPARATE_ISSUE_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)\s+(?P<number>\d+)$")
 PR_ACTIONS_TO_ANALYZE = frozenset({"opened", "reopened", "ready_for_review", "synchronize"})
+ISSUE_ACTIONS_TO_RUN = frozenset({"opened", "reopened", "labeled"})
 
 
 def parse_issue_ref(value: str) -> IssueRef:
@@ -62,6 +63,31 @@ def pr_job_from_payload(payload: Mapping[str, Any], *, delivery_id: str, enqueue
         sender_login=str(sender["login"]) if sender.get("login") is not None else None,
         enqueued_at=enqueued_at,
     )
+
+
+def issue_run_candidate(payload: Mapping[str, Any], *, trigger_label: str = "") -> IssueRef | None:
+    """Return the issue an eligible GitHub App ``issues`` event should run, else None.
+
+    Eligible actions are opened/reopened/labeled. For ``labeled`` a trigger label,
+    when configured, must match the label that was just added. Pull requests also
+    arrive as issues payloads and are never run candidates.
+    """
+    action = str(payload.get("action") or "")
+    if action not in ISSUE_ACTIONS_TO_RUN:
+        return None
+    issue = payload.get("issue") or {}
+    if issue.get("pull_request") is not None:
+        return None
+    full_name = str((payload.get("repository") or {}).get("full_name") or "")
+    number = issue.get("number")
+    if "/" not in full_name or not number:
+        return None
+    if action == "labeled" and trigger_label:
+        added = str((payload.get("label") or {}).get("name") or "")
+        if added != trigger_label:
+            return None
+    owner, repo = full_name.split("/", 1)
+    return IssueRef(repository=RepositoryRef(owner, repo), number=int(number))
 
 
 def compute_run_metrics(

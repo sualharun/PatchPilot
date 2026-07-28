@@ -26,10 +26,12 @@ from agent.infrastructure.db.repositories import (
     SqlAccountRepository,
     SqlAuditLog,
     SqlEvalReportRepository,
+    SqlGitHubAppRepository,
     SqlGitHubConnectionRepository,
     SqlProviderKeyRepository,
     SqlRepositoryCatalog,
     SqlRunRepository,
+    SqlWebhookDeliveryRepository,
 )
 from agent.infrastructure.kafka import KafkaPRJobProducer
 from agent.persistence import RunStore
@@ -46,6 +48,8 @@ class ApplicationContainer:
     provider_keys: SqlProviderKeyRepository
     github_connections: SqlGitHubConnectionRepository
     eval_reports: SqlEvalReportRepository
+    github_app: SqlGitHubAppRepository
+    webhook_deliveries: SqlWebhookDeliveryRepository
     queue_run: QueueRunHandler
     enqueue_pr_analysis: EnqueuePullRequestAnalysisHandler
     record_audit: RecordAuditHandler
@@ -77,6 +81,8 @@ def build_application(
     provider_keys = SqlProviderKeyRepository(store)
     github_connections = SqlGitHubConnectionRepository(store)
     eval_reports = SqlEvalReportRepository(store)
+    github_app = SqlGitHubAppRepository(store)
+    webhook_deliveries = SqlWebhookDeliveryRepository(store)
     github = GitHubClient(settings.github_token)
     clock = SystemClock()
     queries = DashboardQueryService(
@@ -99,6 +105,8 @@ def build_application(
         provider_keys=provider_keys,
         github_connections=github_connections,
         eval_reports=eval_reports,
+        github_app=github_app,
+        webhook_deliveries=webhook_deliveries,
         queue_run=QueueRunHandler(runs, audit_log, clock),
         enqueue_pr_analysis=EnqueuePullRequestAnalysisHandler(KafkaPRJobProducer(settings), audit_log, clock),
         record_audit=RecordAuditHandler(audit_log),

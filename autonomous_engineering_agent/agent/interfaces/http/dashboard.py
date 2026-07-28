@@ -15,6 +15,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.application.commands.dashboard import ConnectGitHubAccountCommand, RecordAuditCommand
+from agent.application.commands.handle_github_app_webhook import (
+    GitHubAppWebhookCommand,
+    GitHubAppWebhookSettings,
+    HandleGitHubAppWebhookHandler,
+)
 from agent.application.commands.handle_pr_webhook import (
     EnqueuePullRequestAnalysisCommand,
     EnqueuePullRequestAnalysisHandler,
@@ -124,12 +129,41 @@ def create_app(database_url: str | None = None) -> FastAPI:
         secret = config.github_app_webhook_secret or config.github_webhook_secret
         if not secret:
             raise HTTPException(status_code=500, detail="GITHUB_APP_WEBHOOK_SECRET is not configured")
-        return await _handle_pull_request_webhook(
-            request=request,
+        body = await request.body()
+        if not verify_github_signature(
             secret=secret,
-            config=config,
+            body=body,
+            signature_header=request.headers.get("X-Hub-Signature-256"),
+        ):
+            raise HTTPException(status_code=401, detail="invalid GitHub webhook signature")
+        event = request.headers.get("X-GitHub-Event", "")
+        delivery_id = request.headers.get("X-GitHub-Delivery", "")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON payload") from exc
+        handler = HandleGitHubAppWebhookHandler(
+            deliveries=container.webhook_deliveries,
+            installations=container.github_app,
+            queue_run=container.queue_run,
+            pr_analysis=EnqueuePullRequestAnalysisHandler(
+                KafkaPRJobProducer(config), container.audit_log, SystemClock()
+            ),
             audit_log=container.audit_log,
+            settings=GitHubAppWebhookSettings(
+                default_model=config.default_model,
+                open_pr=config.github_app_auto_open_pr,
+                trigger_label=config.github_app_trigger_label,
+            ),
         )
+        try:
+            result = handler.execute(
+                GitHubAppWebhookCommand(event=event, delivery_id=delivery_id, payload=payload)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        status_code = 200 if result.status == "duplicate" else 202
+        return JSONResponse({"status": result.status, "event": event, **result.detail}, status_code=status_code)
 
     @app.post("/api/runs")
     def create_run(

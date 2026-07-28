@@ -29,6 +29,7 @@ class SqlRunRepository:
                 iterations=0,
                 max_iterations=run.max_iterations,
                 open_pr=run.open_pr,
+                installation_id=run.installation_id,
                 commands=[],
                 tool_calls=[],
                 patches=[],
@@ -152,6 +153,73 @@ class SqlGitHubConnectionRepository:
             token_hint=token_hint,
             installation_id=installation_id,
         )
+
+
+class SqlWebhookDeliveryRepository:
+    def __init__(self, store: RunStore) -> None:
+        self._store = store
+
+    def record_delivery(self, *, delivery_id: str, event: str, action: str | None) -> bool:
+        return self._store.record_webhook_delivery(delivery_id=delivery_id, event=event, action=action)
+
+    def finish_delivery(self, delivery_id: str, *, status: str, error: str | None = None) -> None:
+        self._store.finish_webhook_delivery(delivery_id, status=status, error=error)
+
+    def list_deliveries(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self._store.list_webhook_deliveries(limit)
+
+
+class SqlGitHubAppRepository:
+    def __init__(self, store: RunStore) -> None:
+        self._store = store
+
+    def upsert_installation(
+        self,
+        *,
+        installation_id: str,
+        account_login: str,
+        account_type: str = "User",
+        status: str = "active",
+    ) -> int:
+        return self._store.upsert_github_app_installation(
+            installation_id=installation_id,
+            account_login=account_login,
+            account_type=account_type,
+            status=status,
+        )
+
+    def set_installation_status(self, installation_id: str, status: str) -> None:
+        self._store.set_github_app_installation_status(installation_id, status)
+
+    def get_installation(self, installation_id: str) -> dict[str, Any] | None:
+        return self._store.get_github_app_installation(installation_id)
+
+    def list_installations(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self._store.list_github_app_installations(limit)
+
+    def add_repository(
+        self,
+        *,
+        installation_id: str,
+        full_name: str,
+        github_repo_id: int | None = None,
+        private: bool = False,
+    ) -> int:
+        return self._store.add_github_app_repository(
+            installation_id=installation_id,
+            full_name=full_name,
+            github_repo_id=github_repo_id,
+            private=private,
+        )
+
+    def remove_repository(self, *, installation_id: str, full_name: str) -> None:
+        self._store.remove_github_app_repository(installation_id=installation_id, full_name=full_name)
+
+    def installation_for_repository(self, full_name: str) -> str | None:
+        return self._store.installation_for_repository(full_name)
+
+    def list_repositories(self, installation_id: str | None = None) -> list[dict[str, Any]]:
+        return self._store.list_github_app_repositories(installation_id)
 
 
 class SqlEvalReportRepository:

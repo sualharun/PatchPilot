@@ -32,6 +32,7 @@ class RunRecord:
     logs_path: str | None = None
     max_iterations: int = 5
     open_pr: bool = False
+    installation_id: str | None = None
     queued_at: str | None = None
     leased_until: str | None = None
     worker_id: str | None = None
@@ -322,6 +323,148 @@ class RunStore:
     def get_github_connection(self) -> dict[str, Any] | None:
         return self._fetch_one("SELECT * FROM github_connections ORDER BY id DESC LIMIT 1", [])
 
+    def record_webhook_delivery(self, *, delivery_id: str, event: str, action: str | None) -> bool:
+        """Insert a delivery row; returns False when delivery_id was already seen."""
+        try:
+            self._insert_generic(
+                "webhook_deliveries",
+                {
+                    "delivery_id": delivery_id,
+                    "event": event,
+                    "action": action,
+                    "received_at": _now(),
+                    "status": "received",
+                },
+            )
+            return True
+        except Exception as exc:
+            self._rollback()
+            if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+                return False
+            raise
+
+    def finish_webhook_delivery(self, delivery_id: str, *, status: str, error: str | None = None) -> None:
+        self._execute(
+            "UPDATE webhook_deliveries SET status = ?, error = ?, processed_at = ? WHERE delivery_id = ?",
+            [status, error, _now(), delivery_id],
+        )
+
+    def list_webhook_deliveries(self, limit: int = 100) -> list[dict[str, Any]]:
+        cursor = self._execute("SELECT * FROM webhook_deliveries ORDER BY id DESC LIMIT ?", [limit])
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+    def upsert_github_app_installation(
+        self,
+        *,
+        installation_id: str,
+        account_login: str,
+        account_type: str = "User",
+        status: str = "active",
+    ) -> int:
+        existing = self._fetch_one(
+            "SELECT * FROM github_app_installations WHERE installation_id = ?", [installation_id]
+        )
+        if existing:
+            self._execute(
+                "UPDATE github_app_installations SET account_login = ?, account_type = ?, status = ?, updated_at = ? "
+                "WHERE installation_id = ?",
+                [account_login, account_type, status, _now(), installation_id],
+            )
+            return int(existing["id"])
+        return self._insert_generic(
+            "github_app_installations",
+            {
+                "installation_id": installation_id,
+                "account_login": account_login,
+                "account_type": account_type,
+                "status": status,
+                "installed_at": _now(),
+            },
+        )
+
+    def set_github_app_installation_status(self, installation_id: str, status: str) -> None:
+        self._execute(
+            "UPDATE github_app_installations SET status = ?, updated_at = ? WHERE installation_id = ?",
+            [status, _now(), installation_id],
+        )
+        if status == "deleted":
+            self._execute(
+                "UPDATE github_app_repositories SET status = 'removed', removed_at = ? WHERE installation_id = ?",
+                [_now(), installation_id],
+            )
+
+    def get_github_app_installation(self, installation_id: str) -> dict[str, Any] | None:
+        return self._fetch_one(
+            "SELECT * FROM github_app_installations WHERE installation_id = ?", [installation_id]
+        )
+
+    def list_github_app_installations(self, limit: int = 100) -> list[dict[str, Any]]:
+        cursor = self._execute("SELECT * FROM github_app_installations ORDER BY id DESC LIMIT ?", [limit])
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+    def add_github_app_repository(
+        self,
+        *,
+        installation_id: str,
+        full_name: str,
+        github_repo_id: int | None = None,
+        private: bool = False,
+    ) -> int:
+        existing = self._fetch_one(
+            "SELECT * FROM github_app_repositories WHERE installation_id = ? AND full_name = ?",
+            [installation_id, full_name],
+        )
+        if existing:
+            self._execute(
+                "UPDATE github_app_repositories SET status = 'active', removed_at = NULL, "
+                "github_repo_id = ?, private = ? WHERE id = ?",
+                [github_repo_id, int(private), int(existing["id"])],
+            )
+            return int(existing["id"])
+        return self._insert_generic(
+            "github_app_repositories",
+            {
+                "installation_id": installation_id,
+                "full_name": full_name,
+                "github_repo_id": github_repo_id,
+                "private": int(private),
+                "status": "active",
+                "added_at": _now(),
+            },
+        )
+
+    def remove_github_app_repository(self, *, installation_id: str, full_name: str) -> None:
+        self._execute(
+            "UPDATE github_app_repositories SET status = 'removed', removed_at = ? "
+            "WHERE installation_id = ? AND full_name = ?",
+            [_now(), installation_id, full_name],
+        )
+
+    def installation_for_repository(self, full_name: str) -> str | None:
+        row = self._fetch_one(
+            """
+            SELECT r.installation_id FROM github_app_repositories r
+            JOIN github_app_installations i ON i.installation_id = r.installation_id
+            WHERE r.full_name = ? AND r.status = 'active' AND i.status = 'active'
+            ORDER BY r.id DESC LIMIT 1
+            """,
+            [full_name],
+        )
+        return str(row["installation_id"]) if row else None
+
+    def list_github_app_repositories(self, installation_id: str | None = None) -> list[dict[str, Any]]:
+        if installation_id:
+            cursor = self._execute(
+                "SELECT * FROM github_app_repositories WHERE installation_id = ? ORDER BY full_name ASC",
+                [installation_id],
+            )
+        else:
+            cursor = self._execute("SELECT * FROM github_app_repositories ORDER BY full_name ASC", [])
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
     def add_eval_report(
         self,
         *,
@@ -394,6 +537,7 @@ class RunStore:
                 "logs_path": "TEXT",
                 "max_iterations": "INTEGER NOT NULL DEFAULT 5",
                 "open_pr": "INTEGER NOT NULL DEFAULT 0",
+                "installation_id": "TEXT",
                 "queued_at": "TEXT",
                 "leased_until": "TEXT",
                 "worker_id": "TEXT",
@@ -681,6 +825,51 @@ class RunStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS github_app_installations (
+              id INTEGER PRIMARY KEY,
+              installation_id TEXT NOT NULL UNIQUE,
+              account_login TEXT NOT NULL,
+              account_type TEXT NOT NULL DEFAULT 'User',
+              status TEXT NOT NULL DEFAULT 'active',
+              installed_at TEXT NOT NULL,
+              updated_at TEXT
+            )
+            """,
+            [],
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS github_app_repositories (
+              id INTEGER PRIMARY KEY,
+              installation_id TEXT NOT NULL,
+              full_name TEXT NOT NULL,
+              github_repo_id INTEGER,
+              private INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL DEFAULT 'active',
+              added_at TEXT NOT NULL,
+              removed_at TEXT,
+              UNIQUE(installation_id, full_name)
+            )
+            """,
+            [],
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+              id INTEGER PRIMARY KEY,
+              delivery_id TEXT NOT NULL UNIQUE,
+              event TEXT NOT NULL,
+              action TEXT,
+              received_at TEXT NOT NULL,
+              processed_at TEXT,
+              status TEXT NOT NULL DEFAULT 'received',
+              error TEXT
+            )
+            """,
+            [],
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS workspace_settings (
               id INTEGER PRIMARY KEY,
               workspace_id INTEGER NOT NULL,
@@ -711,6 +900,8 @@ class RunStore:
             "CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(status, leased_until)",
             "CREATE INDEX IF NOT EXISTS idx_usage_events_workspace ON usage_events(workspace_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_eval_reports_created_at ON eval_reports(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_app_repos_full_name ON github_app_repositories(full_name, status)",
+            "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received ON webhook_deliveries(received_at)",
         ):
             self._execute(statement, [])
 
@@ -755,6 +946,12 @@ class RunStore:
         if self.kind == "postgres":
             return int(cursor.fetchone()[0])
         return int(cursor.lastrowid)
+
+    def _rollback(self) -> None:
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
 
     def _fetch_one(self, sql: str, values: list[Any]) -> dict[str, Any] | None:
         cursor = self._execute(sql, values)

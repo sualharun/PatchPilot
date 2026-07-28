@@ -28,15 +28,15 @@ class _ExecutorAdapter:
 
 
 class _ExecutorFactory:
-    def __init__(self, config: AgentConfig, store: RunStore, github: GitHubClient) -> None:
+    def __init__(self, config: AgentConfig, store: RunStore) -> None:
         self._config = config
         self._store = store
-        self._github = github
 
-    def for_model(self, model: str) -> _ExecutorAdapter:
+    def for_model(self, model: str, installation_id: str | None = None) -> _ExecutorAdapter:
         llm = provider_for_model(model, self._config.openai_api_key, self._config.anthropic_api_key)
+        github = _github_client_from_config(self._config, installation_id=installation_id)
         return _ExecutorAdapter(
-            EngineeringAgent(config=self._config, github=self._github, llm=llm, store=self._store)
+            EngineeringAgent(config=self._config, github=github, llm=llm, store=self._store)
         )
 
 
@@ -46,7 +46,7 @@ def process_queued_runs(config: AgentConfig, *, limit: int = 1) -> WorkerResult:
         handler = ProcessQueuedRunsHandler(
             runs=SqlRunRepository(store),
             audit_log=SqlAuditLog(store),
-            executors=_ExecutorFactory(config, store, _github_client_from_config(config)),
+            executors=_ExecutorFactory(config, store),
             redactor=EnvironmentSecretRedactor(),
             settings=RunWorkerSettings(
                 worker_id=config.worker_id,
@@ -59,8 +59,10 @@ def process_queued_runs(config: AgentConfig, *, limit: int = 1) -> WorkerResult:
         store.close()
 
 
-def _github_client_from_config(config: AgentConfig) -> GitHubClient:
-    if config.github_app_id and config.github_app_installation_id:
+def _github_client_from_config(config: AgentConfig, *, installation_id: str | None = None) -> GitHubClient:
+    """Prefer a short-lived installation token for the run's installation over a broad PAT."""
+    target_installation = installation_id or config.github_app_installation_id
+    if config.github_app_id and target_installation:
         private_key = config.github_app_private_key
         if not private_key and config.github_app_private_key_path:
             private_key = config.github_app_private_key_path.read_text(encoding="utf-8")
@@ -68,7 +70,7 @@ def _github_client_from_config(config: AgentConfig) -> GitHubClient:
             return GitHubClient.from_github_app_installation(
                 app_id=config.github_app_id,
                 private_key=private_key,
-                installation_id=config.github_app_installation_id,
+                installation_id=target_installation,
             )
     return GitHubClient(config.github_token)
 

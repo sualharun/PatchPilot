@@ -52,7 +52,8 @@ class ProcessQueuedRunsHandler:
             run_id = int(queued["id"])
             try:
                 model = str(queued["model"])
-                result = self._executors.for_model(model).execute(
+                installation_id = str(queued["installation_id"]) if queued.get("installation_id") else None
+                result = self._executors.for_model(model, installation_id).execute(
                     ExecuteRunCommand(
                         issue=parse_issue_ref(str(queued["issue_url"])),
                         model=model,

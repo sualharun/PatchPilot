@@ -43,6 +43,7 @@ class QueuedRun:
     max_iterations: int
     open_pr: bool
     requested_by: str
+    installation_id: str | None = None
     status: RunStatus = RunStatus.QUEUED
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)

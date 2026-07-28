@@ -91,6 +91,46 @@ class EvalReportRepository(Protocol):
     def list_eval_reports(self, limit: int = 20) -> list[dict[str, Any]]: ...
 
 
+class WebhookDeliveryRepository(Protocol):
+    def record_delivery(self, *, delivery_id: str, event: str, action: str | None) -> bool: ...
+
+    def finish_delivery(self, delivery_id: str, *, status: str, error: str | None = None) -> None: ...
+
+    def list_deliveries(self, limit: int = 100) -> list[dict[str, Any]]: ...
+
+
+class GitHubAppInstallationRepository(Protocol):
+    def upsert_installation(
+        self,
+        *,
+        installation_id: str,
+        account_login: str,
+        account_type: str = "User",
+        status: str = "active",
+    ) -> int: ...
+
+    def set_installation_status(self, installation_id: str, status: str) -> None: ...
+
+    def get_installation(self, installation_id: str) -> dict[str, Any] | None: ...
+
+    def list_installations(self, limit: int = 100) -> list[dict[str, Any]]: ...
+
+    def add_repository(
+        self,
+        *,
+        installation_id: str,
+        full_name: str,
+        github_repo_id: int | None = None,
+        private: bool = False,
+    ) -> int: ...
+
+    def remove_repository(self, *, installation_id: str, full_name: str) -> None: ...
+
+    def installation_for_repository(self, full_name: str) -> str | None: ...
+
+    def list_repositories(self, installation_id: str | None = None) -> list[dict[str, Any]]: ...
+
+
 class ArtifactCatalog(Protocol):
     def list_artifacts(self, location: str) -> list[str]: ...
 
@@ -211,4 +251,4 @@ class EngineeringRunExecutor(Protocol):
 
 
 class EngineeringRunExecutorFactory(Protocol):
-    def for_model(self, model: str) -> EngineeringRunExecutor: ...
+    def for_model(self, model: str, installation_id: str | None = None) -> EngineeringRunExecutor: ...
