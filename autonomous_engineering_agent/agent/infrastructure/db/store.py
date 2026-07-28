@@ -259,7 +259,18 @@ class RunStore:
         return self._fetch_one("SELECT * FROM users WHERE login = ?", [login])
 
     def workspace_for_login(self, login: str | None) -> dict[str, Any] | None:
-        """The workspace of the logged-in user; first workspace as fallback."""
+        """The workspace tied to a login/installation account.
+
+        A falsy login (no authenticated identity — local dev, basic-auth admin)
+        falls back to the first workspace for single-operator convenience.
+        A *truthy* login with no existing membership gets its own new workspace
+        instead of silently borrowing an unrelated tenant's: this path is hit by
+        GitHub App installation accounts, which are never dashboard users and
+        would otherwise resolve to whichever workspace happens to be first,
+        misattributing their runs/billing to an unrelated tenant. The same slug
+        used by ``upsert_user_from_github`` means a later OAuth signup with this
+        login reuses this workspace rather than creating a duplicate.
+        """
         if login:
             row = self._fetch_one(
                 """
@@ -272,6 +283,7 @@ class RunStore:
             )
             if row:
                 return row
+            return self.get_or_create_workspace(name=login, slug=login.lower())
         return self._fetch_one("SELECT * FROM workspaces ORDER BY id ASC LIMIT 1", [])
 
     def get_or_create_workspace(self, *, name: str, slug: str) -> dict[str, Any]:
