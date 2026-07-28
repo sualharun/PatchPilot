@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 from .config import AgentConfig, validate_config
 from .persistence import RunStore
@@ -93,7 +94,7 @@ def _check_database(config: AgentConfig) -> DoctorCheck:
         store.close()
     except Exception as exc:
         return DoctorCheck(name="database", status="error", message=redact_text(str(exc)))
-    return DoctorCheck(name="database", status="ok", message=config.database_url)
+    return DoctorCheck(name="database", status="ok", message=_redact_database_url(config.database_url))
 
 
 def _check_production_config(config: AgentConfig) -> DoctorCheck:
@@ -164,3 +165,14 @@ def _check_docker_python_image(config: AgentConfig) -> DoctorCheck:
             message=redact_text(completed.stderr or completed.stdout),
         )
     return DoctorCheck(name="docker_python_image", status="ok", message=redact_text(completed.stdout or completed.stderr).strip())
+
+
+def _redact_database_url(database_url: str) -> str:
+    parsed = urlsplit(database_url)
+    if not parsed.password:
+        return database_url
+    username = parsed.username or ""
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    auth = f"{username}:***@" if username else "***@"
+    return urlunsplit((parsed.scheme, f"{auth}{host}{port}", parsed.path, parsed.query, parsed.fragment))

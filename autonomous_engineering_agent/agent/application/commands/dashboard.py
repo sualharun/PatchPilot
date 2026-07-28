@@ -43,6 +43,9 @@ class ConnectGitHubAccountCommand:
     scopes: str | None
     token_hint: str | None
     installation_id: str | None = None
+    github_user_id: str | None = None
+    name: str | None = None
+    avatar_url: str | None = None
 
 
 class ConnectGitHubAccountHandler:
@@ -57,7 +60,16 @@ class ConnectGitHubAccountHandler:
         self._audit_log = audit_log
 
     def execute(self, command: ConnectGitHubAccountCommand) -> None:
-        user = self._accounts.get_or_create_user(email=command.email, name=command.login)
+        if command.github_user_id:
+            user = self._accounts.upsert_github_user(
+                github_user_id=command.github_user_id,
+                login=command.login,
+                name=command.name or command.login,
+                email=command.email,
+                avatar_url=command.avatar_url,
+            )
+        else:
+            user = self._accounts.get_or_create_user(email=command.email, name=command.login)
         self._connections.upsert_github_connection(
             user_id=int(user["id"]) if user.get("id") else None,
             login=command.login,

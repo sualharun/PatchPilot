@@ -16,6 +16,7 @@ class QueueRunCommand:
     open_pr: bool
     requested_by: str
     installation_id: str | None = None
+    workspace_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class QueueRunHandler:
             open_pr=command.open_pr,
             requested_by=command.requested_by,
             installation_id=command.installation_id,
+            workspace_id=command.workspace_id,
         )
         run_id = self._runs.queue_run(queued_run)
         self._audit_log.record_event(

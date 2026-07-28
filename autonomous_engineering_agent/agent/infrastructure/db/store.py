@@ -33,6 +33,7 @@ class RunRecord:
     max_iterations: int = 5
     open_pr: bool = False
     installation_id: str | None = None
+    workspace_id: int | None = None
     queued_at: str | None = None
     leased_until: str | None = None
     worker_id: str | None = None
@@ -83,8 +84,15 @@ class RunStore:
         data = dict(zip(columns, row, strict=True))
         return _decode_run(data)
 
-    def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
-        cursor = self._execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", [limit])
+    def list_runs(self, limit: int = 50, workspace_id: int | None = None) -> list[dict[str, Any]]:
+        if workspace_id is not None:
+            # Legacy runs queued before workspaces have NULL and stay visible.
+            cursor = self._execute(
+                "SELECT * FROM runs WHERE workspace_id = ? OR workspace_id IS NULL ORDER BY id DESC LIMIT ?",
+                [workspace_id, limit],
+            )
+        else:
+            cursor = self._execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", [limit])
         columns = [description[0] for description in cursor.description]
         rows = []
         for row in cursor.fetchall():
@@ -179,6 +187,60 @@ class RunStore:
         user_id = self._insert_generic("users", {"email": email, "name": name, "created_at": _now()})
         return self._fetch_one("SELECT * FROM users WHERE id = ?", [user_id]) or {}
 
+    def upsert_user_from_github(
+        self,
+        *,
+        github_user_id: str,
+        login: str,
+        name: str,
+        email: str,
+        avatar_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a real user record from a GitHub OAuth profile."""
+        existing = self._fetch_one(
+            "SELECT * FROM users WHERE github_user_id = ?", [github_user_id]
+        ) or self._fetch_one("SELECT * FROM users WHERE email = ?", [email])
+        if existing:
+            self._execute(
+                "UPDATE users SET github_user_id = ?, login = ?, name = ?, email = ?, avatar_url = ? WHERE id = ?",
+                [github_user_id, login, name, email, avatar_url, int(existing["id"])],
+            )
+            user_id = int(existing["id"])
+        else:
+            user_id = self._insert_generic(
+                "users",
+                {
+                    "email": email,
+                    "name": name,
+                    "github_user_id": github_user_id,
+                    "login": login,
+                    "avatar_url": avatar_url,
+                    "created_at": _now(),
+                },
+            )
+        workspace = self.get_or_create_workspace(name=name or login, slug=login.lower())
+        self.ensure_membership(user_id, int(workspace["id"]), role="owner")
+        return self._fetch_one("SELECT * FROM users WHERE id = ?", [user_id]) or {}
+
+    def get_user_by_login(self, login: str) -> dict[str, Any] | None:
+        return self._fetch_one("SELECT * FROM users WHERE login = ?", [login])
+
+    def workspace_for_login(self, login: str | None) -> dict[str, Any] | None:
+        """The workspace of the logged-in user; first workspace as fallback."""
+        if login:
+            row = self._fetch_one(
+                """
+                SELECT w.* FROM workspaces w
+                JOIN memberships m ON m.workspace_id = w.id
+                JOIN users u ON u.id = m.user_id
+                WHERE u.login = ? ORDER BY m.id ASC LIMIT 1
+                """,
+                [login],
+            )
+            if row:
+                return row
+        return self._fetch_one("SELECT * FROM workspaces ORDER BY id ASC LIMIT 1", [])
+
     def get_or_create_workspace(self, *, name: str, slug: str) -> dict[str, Any]:
         existing = self._fetch_one("SELECT * FROM workspaces WHERE slug = ?", [slug])
         if existing:
@@ -198,18 +260,24 @@ class RunStore:
             {"user_id": user_id, "workspace_id": workspace_id, "role": role, "created_at": _now()},
         )
 
-    def get_account_context(self) -> dict[str, Any]:
-        workspace = self._fetch_one("SELECT * FROM workspaces ORDER BY id ASC LIMIT 1", []) or {
-            "id": 0,
-            "name": "PatchPilot",
-            "slug": "default",
-        }
-        user = self._fetch_one("SELECT * FROM users ORDER BY id ASC LIMIT 1", []) or {
+    def get_account_context(self, login: str | None = None) -> dict[str, Any]:
+        user = (self.get_user_by_login(login) if login else None) or self._fetch_one(
+            "SELECT * FROM users ORDER BY id ASC LIMIT 1", []
+        ) or {
             "id": 0,
             "email": "local@patchpilot.dev",
             "name": "PatchPilot",
         }
-        github = self._fetch_one("SELECT * FROM github_connections ORDER BY id DESC LIMIT 1", [])
+        workspace = self.workspace_for_login(login or user.get("login")) or {
+            "id": 0,
+            "name": "PatchPilot",
+            "slug": "default",
+        }
+        github = None
+        if user.get("login"):
+            github = self._fetch_one("SELECT * FROM github_connections WHERE login = ?", [user["login"]])
+        if github is None:
+            github = self._fetch_one("SELECT * FROM github_connections ORDER BY id DESC LIMIT 1", [])
         return {"workspace": workspace, "user": user, "github": github}
 
     def upsert_repository(self, *, full_name: str, workspace_id: int | None = None, **fields: Any) -> int:
@@ -538,6 +606,7 @@ class RunStore:
                 "max_iterations": "INTEGER NOT NULL DEFAULT 5",
                 "open_pr": "INTEGER NOT NULL DEFAULT 0",
                 "installation_id": "TEXT",
+                "workspace_id": "INTEGER",
                 "queued_at": "TEXT",
                 "leased_until": "TEXT",
                 "worker_id": "TEXT",
@@ -565,10 +634,17 @@ class RunStore:
               id INTEGER PRIMARY KEY,
               email TEXT NOT NULL UNIQUE,
               name TEXT NOT NULL,
+              github_user_id TEXT,
+              login TEXT,
+              avatar_url TEXT,
               created_at TEXT NOT NULL
             )
             """,
             [],
+        )
+        self._ensure_columns(
+            {"github_user_id": "TEXT", "login": "TEXT", "avatar_url": "TEXT"},
+            table="users",
         )
         self._execute(
             """
@@ -969,11 +1045,11 @@ class RunStore:
         self._conn.commit()
         return cursor
 
-    def _ensure_columns(self, columns: dict[str, str]) -> None:
-        existing = self._existing_columns("runs")
+    def _ensure_columns(self, columns: dict[str, str], table: str = "runs") -> None:
+        existing = self._existing_columns(table)
         for name, definition in columns.items():
             if name not in existing:
-                self._execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}", [])
+                self._execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}", [])
 
     def _existing_columns(self, table: str) -> set[str]:
         if self.kind == "postgres":

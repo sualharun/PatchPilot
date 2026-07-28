@@ -30,6 +30,7 @@ class SqlRunRepository:
                 max_iterations=run.max_iterations,
                 open_pr=run.open_pr,
                 installation_id=run.installation_id,
+                workspace_id=run.workspace_id,
                 commands=[],
                 tool_calls=[],
                 patches=[],
@@ -49,8 +50,8 @@ class SqlRunRepository:
     def get_run(self, run_id: int) -> dict[str, Any]:
         return self._store.get_run(run_id)
 
-    def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
-        return self._store.list_runs(limit)
+    def list_runs(self, limit: int = 50, workspace_id: int | None = None) -> list[dict[str, Any]]:
+        return self._store.list_runs(limit, workspace_id=workspace_id)
 
     def list_runs_by_status(self, status: str, limit: int = 10) -> list[dict[str, Any]]:
         return self._store.list_runs_by_status(status, limit)
@@ -98,14 +99,34 @@ class SqlAccountRepository:
     def __init__(self, store: RunStore) -> None:
         self._store = store
 
-    def get_account_context(self) -> dict[str, Any]:
-        return self._store.get_account_context()
+    def get_account_context(self, login: str | None = None) -> dict[str, Any]:
+        return self._store.get_account_context(login)
 
     def seed_defaults(self, *, username: str, workspace_name: str = "PatchPilot") -> None:
         self._store.seed_defaults(username=username, workspace_name=workspace_name)
 
     def get_or_create_user(self, *, email: str, name: str) -> dict[str, Any]:
         return self._store.get_or_create_user(email=email, name=name)
+
+    def upsert_github_user(
+        self,
+        *,
+        github_user_id: str,
+        login: str,
+        name: str,
+        email: str,
+        avatar_url: str | None = None,
+    ) -> dict[str, Any]:
+        return self._store.upsert_user_from_github(
+            github_user_id=github_user_id,
+            login=login,
+            name=name,
+            email=email,
+            avatar_url=avatar_url,
+        )
+
+    def workspace_for_login(self, login: str | None) -> dict[str, Any] | None:
+        return self._store.workspace_for_login(login)
 
 
 class SqlRepositoryCatalog:

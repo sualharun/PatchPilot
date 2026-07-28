@@ -58,6 +58,33 @@ def test_run_doctor_can_skip_database_check(monkeypatch):
     assert "skipped" in database_check.message
 
 
+def test_run_doctor_redacts_database_password(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    class FakeRunStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("agent.doctor.RunStore", FakeRunStore)
+
+    checks = run_doctor(
+        AgentConfig(database_url="postgresql://patchpilot:super-secret@postgres:5432/patchpilot"),
+    )
+
+    database_check = next(check for check in checks if check.name == "database")
+    assert database_check.status == "ok"
+    assert "super-secret" not in database_check.message
+    assert "patchpilot:***@" in database_check.message
+
+
 def test_production_doctor_fails_closed_without_required_settings(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
 

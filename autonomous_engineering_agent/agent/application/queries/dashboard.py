@@ -55,8 +55,8 @@ class DashboardQueryService:
         self._eval_reports = eval_reports
         self._artifacts = artifacts
 
-    def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
-        return self._runs.list_runs(limit=max(1, min(limit, 500)))
+    def list_runs(self, limit: int = 50, workspace_id: int | None = None) -> list[dict[str, Any]]:
+        return self._runs.list_runs(limit=max(1, min(limit, 500)), workspace_id=workspace_id)
 
     def get_run(self, run_id: int) -> dict[str, Any]:
         return self._runs.get_run(run_id)
@@ -71,8 +71,11 @@ class DashboardQueryService:
     def list_artifacts(self, location: str) -> list[str]:
         return self._artifacts.list_artifacts(location)
 
-    def account(self) -> dict[str, Any]:
-        return self._accounts.get_account_context()
+    def account(self, login: str | None = None) -> dict[str, Any]:
+        return self._accounts.get_account_context(login)
+
+    def workspace_for_login(self, login: str | None) -> dict[str, Any] | None:
+        return self._accounts.workspace_for_login(login)
 
     def repositories(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._repositories.list_repositories(limit=max(1, min(limit, 500)))
@@ -86,8 +89,8 @@ class DashboardQueryService:
     def eval_reports(self, limit: int = 20) -> list[dict[str, Any]]:
         return self._eval_reports.list_eval_reports(limit=max(1, min(limit, 100)))
 
-    def test_overview(self, limit: int = 100) -> dict[str, Any]:
-        runs = self.list_runs(limit)
+    def test_overview(self, limit: int = 100, workspace_id: int | None = None) -> dict[str, Any]:
+        runs = self.list_runs(limit, workspace_id=workspace_id)
         return {
             "runs": runs,
             "passing": sum(1 for run in runs if run.get("status") in {"success", "pr_opened"}),
@@ -96,8 +99,8 @@ class DashboardQueryService:
             "setup_failed": sum(1 for run in runs if run.get("status") == "setup_failed"),
         }
 
-    def billing_overview(self, limit: int = 500) -> dict[str, Any]:
-        runs = self.list_runs(limit)
+    def billing_overview(self, limit: int = 500, workspace_id: int | None = None) -> dict[str, Any]:
+        runs = self.list_runs(limit, workspace_id=workspace_id)
         total_cost = sum(float(run.get("estimated_cost_usd") or 0) for run in runs)
         by_model: dict[str, dict[str, float]] = {}
         for run in runs:

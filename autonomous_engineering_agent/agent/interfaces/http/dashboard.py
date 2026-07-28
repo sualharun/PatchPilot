@@ -64,12 +64,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return {"status": "ready", "database": container.database_kind}
 
     @app.get("/api/runs")
-    def list_runs(limit: int = 50):
-        return {"runs": _runs_for_display(queries, config, limit=limit)}
+    def list_runs(request: Request, limit: int = 50):
+        workspace_id = _request_workspace_id(request, config, queries)
+        return {"runs": _runs_for_display(queries, config, limit=limit, workspace_id=workspace_id)}
 
     @app.get("/api/stats")
-    def stats():
-        return _stats(_runs_for_display(queries, config, limit=250))
+    def stats(request: Request):
+        workspace_id = _request_workspace_id(request, config, queries)
+        return _stats(_runs_for_display(queries, config, limit=250, workspace_id=workspace_id))
 
     @app.get("/api/audit-events")
     def audit_events(limit: int = 100):
@@ -182,6 +184,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 max_iterations=max_iterations,
                 open_pr=open_pr == "true",
                 requested_by=_current_user(request, config),
+                workspace_id=_request_workspace_id(request, config, queries),
             )
         )
         return RedirectResponse(f"/runs/{result.run_id}", status_code=303)
@@ -321,7 +324,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
         if config.github_oauth_mock_enabled and code == "mock":
             access_token = "mock-oauth-token"
             token_payload = {"scope": "read:user user:email repo"}
-            user_payload = {"login": "mock-github-user", "email": "mock-github-user@example.invalid"}
+            user_payload = {
+                "id": 424242,
+                "login": "mock-github-user",
+                "name": "Mock GitHub User",
+                "email": "mock-github-user@example.invalid",
+                "avatar_url": "https://avatars.githubusercontent.com/u/424242",
+            }
         else:
             token_response = requests.post(
                 "https://github.com/login/oauth/access_token",
@@ -354,6 +363,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 email=email,
                 token_hint=_secret_hint(access_token),
                 scopes=str(token_payload.get("scope") or "read:user user:email repo"),
+                github_user_id=str(user_payload["id"]) if user_payload.get("id") is not None else None,
+                name=str(user_payload.get("name") or login_name),
+                avatar_url=str(user_payload.get("avatar_url") or "") or None,
             )
         )
         response = RedirectResponse(next_path, status_code=303)
@@ -401,8 +413,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return response
 
     @app.get("/runs", response_class=HTMLResponse)
-    def runs():
-        display_runs = _runs_for_display(queries, config, limit=50)
+    def runs(request: Request):
+        workspace_id = _request_workspace_id(request, config, queries)
+        display_runs = _runs_for_display(queries, config, limit=50, workspace_id=workspace_id)
         stats_data = _stats(display_runs)
         total_runs = int(stats_data["total_runs"])
         repository_options = _run_filter_options(display_runs, "repo")
@@ -656,7 +669,8 @@ E     + where False = &lt;Response [503]&gt;.ok
 
     @app.get("/overview", response_class=HTMLResponse)
     def overview(request: Request):
-        stats_data = _stats(_runs_for_display(queries, config, limit=250))
+        workspace_id = _request_workspace_id(request, config, queries)
+        stats_data = _stats(_runs_for_display(queries, config, limit=250, workspace_id=workspace_id))
         return _dashboard_page(
             "Overview",
             "Workspace health, recent autonomous fixes, and deployment readiness signals.",
@@ -683,48 +697,63 @@ E     + where False = &lt;Response [503]&gt;.ok
         )
 
     @app.get("/issues", response_class=HTMLResponse)
-    def issues():
+    def issues(request: Request):
+        workspace_id = _request_workspace_id(request, config, queries)
         return _dashboard_page(
             "Issues",
             "GitHub issues queued for autonomous triage, planning, patching, and PR creation.",
             "issues",
-            _issues_content(queries.list_runs(limit=50)),
+            _issues_content(queries.list_runs(limit=50, workspace_id=workspace_id)),
         )
 
     @app.get("/pull-requests", response_class=HTMLResponse)
-    def pull_requests():
+    def pull_requests(request: Request):
+        workspace_id = _request_workspace_id(request, config, queries)
         return _dashboard_page(
             "Pull Requests",
             "Draft PRs opened by PatchPilot with summaries, checks, and reviewer handoff.",
             "pull-requests",
-            _pull_requests_content(queries.list_runs(limit=50)),
+            _pull_requests_content(queries.list_runs(limit=50, workspace_id=workspace_id)),
         )
 
     @app.get("/tests", response_class=HTMLResponse)
-    def tests_page():
+    def tests_page(request: Request):
+        workspace_id = _request_workspace_id(request, config, queries)
         return _dashboard_page(
             "Tests",
             "Docker test runs, command output, retry attempts, and pass/fail history.",
             "tests",
-            _tests_content(queries.test_overview(limit=100)),
+            _tests_content(queries.test_overview(limit=100, workspace_id=workspace_id)),
         )
 
     @app.get("/settings", response_class=HTMLResponse)
-    def settings():
+    def settings(request: Request):
+        account = queries.account(_session_login(request, config))
         return _dashboard_page(
             "Settings",
             "Workspace settings for GitHub tokens, provider keys, budgets, and safety controls.",
             "settings",
-            _settings_content(queries.account(), queries.provider_keys(), config),
+            _settings_content(account, queries.provider_keys(), config, _csrf_token(request, config)),
+        )
+
+    @app.get("/account", response_class=HTMLResponse)
+    def account_page(request: Request):
+        account = queries.account(_session_login(request, config))
+        return _dashboard_page(
+            "Account",
+            "Your profile, GitHub identity, workspace membership, and session controls.",
+            "settings",
+            _account_content(account, _csrf_token(request, config)),
         )
 
     @app.get("/billing", response_class=HTMLResponse)
-    def billing():
+    def billing(request: Request):
+        workspace_id = _request_workspace_id(request, config, queries)
         return _dashboard_page(
             "Billing",
             "Token usage, provider costs, run budgets, and workspace billing controls.",
             "billing",
-            _billing_content(queries.billing_overview(limit=500)),
+            _billing_content(queries.billing_overview(limit=500, workspace_id=workspace_id)),
         )
 
     @app.get("/audit-log", response_class=HTMLResponse)
@@ -1089,12 +1118,14 @@ Queue a run to capture Docker stdout, stderr, exit code, and runtime.</pre></art
 """
 
 
-def _settings_content(account: dict, provider_rows: list[dict], config) -> str:
+def _settings_content(account: dict, provider_rows: list[dict], config, csrf_token: str = "") -> str:
     github = account.get("github")
+    user = account.get("user") or {}
     providers = {key["provider"]: key["key_hint"] for key in provider_rows}
+    avatar = _avatar_html(user)
     return f"""
 <section class="app-grid two">
-  <article id="account" class="app-card settings-card"><h2>Account</h2><label>User<input value="{_escape_attr(str(account['user'].get('name')))}" readonly></label><label>Email<input value="{_escape_attr(str(account['user'].get('email')))}" readonly></label><label>GitHub<input value="{_escape_attr(str(github.get('login') if github else 'not connected'))}" readonly></label></article>
+  <article id="account" class="app-card settings-card"><h2>Account</h2>{avatar}<label>User<input value="{_escape_attr(str(user.get('name')))}" readonly></label><label>Email<input value="{_escape_attr(str(user.get('email')))}" readonly></label><label>GitHub<input value="{_escape_attr(str((github or {}).get('login') or user.get('login') or 'not connected'))}" readonly></label><p><a href="/account">Open profile settings</a></p><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{csrf_token}"><button class="button outline" type="submit">Sign out</button></form></article>
   <article id="providers" class="app-card settings-card"><h2>Provider Keys</h2><label>OpenAI API key<input value="{_escape_attr(providers.get('openai', 'not configured'))}" readonly></label><label>Anthropic API key<input value="{_escape_attr(providers.get('anthropic', 'not configured'))}" readonly></label><label>Artifact storage<input value="{_escape_attr(str(config.artifact_storage_dir))}" readonly></label></article>
 </section>
 <section class="app-grid two">
@@ -1104,6 +1135,42 @@ def _settings_content(account: dict, provider_rows: list[dict], config) -> str:
 <section id="safety" class="app-card">
   <header><h2>Safety Controls</h2><a href="/security">Review security</a></header>
   <div class="check-list columns"><p>✓ Redact secrets in logs</p><p>✓ Docker-only execution</p><p>✓ Command allowlist</p><p>✓ PR creation gated</p><p>✓ Runtime limits</p><p>✓ Persist audit trail</p></div>
+</section>
+"""
+
+
+def _avatar_html(user: dict) -> str:
+    avatar_url = str(user.get("avatar_url") or "")
+    if not avatar_url:
+        return ""
+    return (
+        f'<img class="account-avatar" src="{_escape_attr(avatar_url)}" alt="GitHub avatar" '
+        'width="64" height="64" style="border-radius:50%;margin-bottom:12px">'
+    )
+
+
+def _account_content(account: dict, csrf_token: str) -> str:
+    user = account.get("user") or {}
+    workspace = account.get("workspace") or {}
+    github = account.get("github")
+    connected = "connected" if github else "not connected"
+    return f"""
+<section class="app-grid two">
+  <article id="profile" class="app-card settings-card">
+    <h2>Profile</h2>
+    {_avatar_html(user)}
+    <label>Name<input value="{_escape_attr(str(user.get('name') or ''))}" readonly></label>
+    <label>Email<input value="{_escape_attr(str(user.get('email') or ''))}" readonly></label>
+    <label>GitHub login<input value="{_escape_attr(str(user.get('login') or 'not connected'))}" readonly></label>
+    <p class="fine-print">Profile fields come from your GitHub account and update on each sign-in.</p>
+  </article>
+  <article id="workspace" class="app-card settings-card">
+    <h2>Workspace</h2>
+    <label>Workspace<input value="{_escape_attr(str(workspace.get('name') or 'PatchPilot'))}" readonly></label>
+    <label>Slug<input value="{_escape_attr(str(workspace.get('slug') or 'default'))}" readonly></label>
+    <label>GitHub connection<input value="{_escape_attr(connected)}" readonly></label>
+    <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{csrf_token}"><button class="button dark" type="submit">Sign out</button></form>
+  </article>
 </section>
 """
 
@@ -1386,11 +1453,20 @@ def _page_tabs(nav_active: str) -> str:
     return f'<nav class="platform-tabs" aria-label="{_escape_attr(nav_active)} sections">{"".join(links)}</nav>'
 
 
-def _runs_for_display(queries, config, *, limit: int) -> list[dict]:
-    runs = queries.list_runs(limit=limit)
+def _runs_for_display(queries, config, *, limit: int, workspace_id: int | None = None) -> list[dict]:
+    runs = queries.list_runs(limit=limit, workspace_id=workspace_id)
     if runs or not config.dashboard_demo_data_enabled:
         return runs
     return _sample_runs()[:limit]
+
+
+def _request_workspace_id(request: Request | None, config, queries) -> int | None:
+    login = _current_user(request, config) if request is not None else None
+    if login in {"local-dev", "anonymous", None}:
+        login = None
+    workspace = queries.workspace_for_login(login)
+    workspace_id = (workspace or {}).get("id")
+    return int(workspace_id) if workspace_id else None
 
 
 def _audit_events_for_display(queries, config, *, limit: int) -> list[dict]:
@@ -1686,6 +1762,13 @@ def _is_authenticated(request: Request, config) -> bool:
         return False
     user = _verify_session(session, config)
     return user is not None
+
+
+def _session_login(request: Request | None, config) -> str | None:
+    """The signed-in login from the session cookie, or None outside a session."""
+    if request is None:
+        return None
+    return _verify_session(request.cookies.get(SESSION_COOKIE) or "", config)
 
 
 def _current_user(request: Request, config) -> str:

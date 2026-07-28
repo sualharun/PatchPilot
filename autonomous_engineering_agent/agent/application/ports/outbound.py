@@ -26,7 +26,7 @@ class RunRepository(Protocol):
 
     def get_run(self, run_id: int) -> dict[str, Any]: ...
 
-    def list_runs(self, limit: int = 50) -> list[dict[str, Any]]: ...
+    def list_runs(self, limit: int = 50, workspace_id: int | None = None) -> list[dict[str, Any]]: ...
 
     def list_runs_by_status(self, status: str, limit: int = 10) -> list[dict[str, Any]]: ...
 
@@ -54,11 +54,23 @@ class AuditLog(Protocol):
 
 
 class AccountRepository(Protocol):
-    def get_account_context(self) -> dict[str, Any]: ...
+    def get_account_context(self, login: str | None = None) -> dict[str, Any]: ...
 
     def seed_defaults(self, *, username: str, workspace_name: str = "PatchPilot") -> None: ...
 
     def get_or_create_user(self, *, email: str, name: str) -> dict[str, Any]: ...
+
+    def upsert_github_user(
+        self,
+        *,
+        github_user_id: str,
+        login: str,
+        name: str,
+        email: str,
+        avatar_url: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def workspace_for_login(self, login: str | None) -> dict[str, Any] | None: ...
 
 
 class RepositoryCatalog(Protocol):
