@@ -91,7 +91,9 @@ else
   run_step "Local preflight" "${doctor_args[@]}"
 fi
 
-run_step "Database migration check" python3 -m agent.cli migrate --env-file "$env_file"
+if [[ "$skip_database" != "true" ]]; then
+  run_step "Database migration check" python3 -m agent.cli migrate --env-file "$env_file"
+fi
 
 if [[ "$skip_tests" != "true" ]]; then
   run_step "Unit tests" env \
