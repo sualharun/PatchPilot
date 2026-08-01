@@ -1,3 +1,5 @@
+name: patchpilot
+
 services:
   caddy:
     image: caddy:2.8
