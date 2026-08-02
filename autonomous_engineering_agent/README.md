@@ -357,7 +357,7 @@ Synthetic eval reports are stored in the configured database and shown on the Ag
 
 ## `agent.yaml`
 
-Repositories can override setup, tests, sandbox limits, and storage:
+Repositories can override setup and test commands:
 
 ```yaml
 install_commands:
@@ -365,22 +365,22 @@ install_commands:
   - python -m pip install -e .
 test_commands:
   - python -m pytest
-sandbox:
-  image: python:3.11-slim
-  cpu_limit: "2"
-  memory_limit: 2g
-  network: bridge
-  install_timeout_seconds: 600
-  test_timeout_seconds: 600
 ```
 
 If no commands are configured, the agent detects common Python project files: `pyproject.toml`, `requirements.txt`, `setup.py`, `Pipfile`, and `poetry.lock`.
+
+A `sandbox:` block (image, network, allowed commands, resource limits) is deliberately **not**
+honored from a target repository's own `agent.yaml` -- that repository is untrusted input, and
+letting it loosen its own sandbox would defeat the sandbox. Sandbox settings always come from the
+deployment's own configuration (environment variables / the operator's `agent.yaml`, if any). See
+`SECURITY.md`.
 
 ## Safety Model
 
 - Target repository commands run inside Docker.
 - Docker runs with CPU, memory, and runtime limits.
-- Commands are checked against a conservative allowlist.
+- Commands are checked against a versioned allowlist (`agent/infrastructure/sandbox/command_policy.json`), not honored from the target repository.
+- Sandboxed commands have no network access by default; only dependency installation gets network, on a dedicated network isolated from other project containers and the cloud metadata endpoint. See `SECURITY.md`.
 - Shell control operators such as `;`, `&&`, pipes, redirects, and command substitution are rejected.
 - API keys and tokens are redacted from logs and command output.
 - The agent does not push branches or open PRs unless `--open-pr true`.

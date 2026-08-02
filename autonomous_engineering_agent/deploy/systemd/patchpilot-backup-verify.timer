@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the PatchPilot Postgres backup restore verification weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

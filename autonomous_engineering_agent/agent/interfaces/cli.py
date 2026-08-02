@@ -16,6 +16,7 @@ from agent.infrastructure.db.seeds import seed_database
 from agent.infrastructure.db.store import RunStore
 from agent.infrastructure.github.client import GitHubClient
 from agent.infrastructure.llm.providers import provider_for_model
+from agent.infrastructure.observability import capture_exception, init_sentry
 from agent.infrastructure.security.secrets import redact_text
 from agent.interfaces.http.dashboard import serve_dashboard
 from agent.interfaces.workers.pr_worker import process_pr_analysis_jobs
@@ -77,9 +78,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "worker":
         config = load_config(env_file=Path(args.env_file))
+        init_sentry(config.sentry_dsn, environment="production" if config.production else "development")
         failed = 0
         while True:
-            worker_result = process_queued_runs(config, limit=args.limit)
+            try:
+                worker_result = process_queued_runs(config, limit=args.limit)
+            except Exception:
+                capture_exception()
+                raise
             failed += worker_result.failed
             print(f"processed: {worker_result.processed}")
             print(f"succeeded: {worker_result.succeeded}")
@@ -89,9 +95,14 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(args.sleep_seconds)
     if args.command == "pr-worker":
         config = load_config(env_file=Path(args.env_file))
+        init_sentry(config.sentry_dsn, environment="production" if config.production else "development")
         failed = 0
         while True:
-            pr_result = process_pr_analysis_jobs(config, limit=args.limit)
+            try:
+                pr_result = process_pr_analysis_jobs(config, limit=args.limit)
+            except Exception:
+                capture_exception()
+                raise
             failed += pr_result.failed
             print(f"processed: {pr_result.processed}")
             print(f"succeeded: {pr_result.succeeded}")

@@ -1,0 +1,13 @@
+[Unit]
+Description=PatchPilot Postgres backup
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# Adjust to wherever the repo is actually cloned on this host.
+WorkingDirectory=/opt/patchpilot/app
+ExecStart=/opt/patchpilot/app/scripts/backup-postgres.sh
+Environment=BACKUP_DIR=/opt/patchpilot/backups
+Environment=BACKUP_RETENTION_DAYS=14
+# Failures are visible via: systemctl status patchpilot-backup.service / journalctl -u patchpilot-backup.service

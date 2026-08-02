@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "description": "Executables the sandbox is allowed to run for any repository. Adding, removing, or changing this list is a security-relevant change and must go through normal code review, not a config default.",
+  "allowed_commands": [
+    "python",
+    "python3",
+    "pip",
+    "pytest",
+    "coverage",
+    "tox",
+    "nox",
+    "poetry",
+    "pipenv",
+    "unittest",
+    "make"
+  ]
+}

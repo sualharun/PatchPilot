@@ -3,25 +3,12 @@ install_commands:
   - python -m pip install -e .
 test_commands:
   - python -m pytest
-sandbox:
-  image: python:3.11-slim
-  cpu_limit: "2"
-  memory_limit: 2g
-  network: bridge
-  install_timeout_seconds: 600
-  test_timeout_seconds: 600
-  command_timeout_seconds: 300
-  allowed_commands:
-    - python
-    - python3
-    - pip
-    - pytest
-    - coverage
-    - tox
-    - nox
-    - poetry
-    - pipenv
-    - unittest
-    - make
+# NOTE: a `sandbox:` block here (image, network, allowed_commands, resource limits) is
+# intentionally ignored when this file lives inside a *target* repository the agent is
+# fixing issues in -- the sandbox's network access and command allowlist are a
+# deployment-controlled security boundary, not something an untrusted repo can loosen by
+# editing its own agent.yaml. Configure sandbox settings via the deployment's own
+# agent.yaml/environment variables instead (see README.md's "agent.yaml" section and
+# SECURITY.md).
 logs_dir: .agent-logs
 database_url: sqlite:///agent_runs.sqlite3

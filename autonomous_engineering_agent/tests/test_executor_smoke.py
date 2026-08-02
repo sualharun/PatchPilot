@@ -62,7 +62,7 @@ class LocalSandbox:
     def __init__(self, config) -> None:
         self.config = config
 
-    def run(self, repo_path: Path, command: str, timeout_seconds: int | None = None):
+    def run(self, repo_path: Path, command: str, timeout_seconds: int | None = None, *, needs_network: bool = False):
         started = time.monotonic()
         completed = subprocess.run(
             command,

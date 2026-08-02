@@ -6,7 +6,18 @@ This project executes untrusted repository code, so the sandbox is a core produc
 
 - Repository commands run inside Docker.
 - Docker runs with CPU, memory, and timeout limits.
-- Commands are checked against an allowlist.
+- Commands are checked against an allowlist, defined in a checked-in, versioned policy file
+  (`agent/infrastructure/sandbox/command_policy.json`) rather than a silent code default --
+  changing what a sandboxed run may execute now shows up as a reviewable diff.
+- Sandboxed commands have no network access by default (`--network none`). Only dependency
+  installation (`install_commands`) runs with `needs_network=True`, and only on a dedicated
+  Docker network (`patchpilot-sandbox-egress`, see `scripts/setup-sandbox-network.sh`) that is
+  isolated from the other project containers (postgres, redpanda, the dashboard) by Docker's
+  default inter-network isolation, and has the cloud metadata endpoint (`169.254.169.254`)
+  blocked via a host `iptables` rule in the `DOCKER-USER` chain. Test runs and LLM-driven
+  tool-call commands never get network access, regardless of what the repository requests.
+- A repository's own `agent.yaml` cannot override the sandbox's network or command allowlist --
+  those always come from the deployment-controlled base config, not the untrusted repo.
 - Shell control operators are rejected.
 - API keys and common token formats are redacted from logs.
 - PR creation and push are disabled unless `--open-pr true`.
@@ -28,8 +39,21 @@ This project executes untrusted repository code, so the sandbox is a core produc
 ## Known Gaps
 
 - Docker is not a perfect security boundary against malicious code.
-- Dependency installation currently allows network access by default.
-- The command allowlist is intentionally conservative but not yet policy-versioned.
+- **Fixed:** dependency installation used to get full outbound network access on the default
+  Docker bridge (reachable from other containers/the host); it now runs on an isolated,
+  install-only network, and all other sandboxed commands default to no network at all.
+- **Fixed:** the command allowlist used to be a silent `set[str]` config default; it is now a
+  checked-in, versioned JSON policy file.
+- **Still open:** the metadata-endpoint block and the install network's isolation from the
+  compose stack depend on `scripts/setup-sandbox-network.sh` having been run on the host (and
+  its `iptables` rule surviving reboots, which is not automatic -- see the script's output for
+  persistence options). `DockerSandbox` will lazily create the install network if the script
+  was never run, but without the `iptables` rule the metadata endpoint would not be blocked in
+  that case.
+- **Still open:** the install network still gives outbound internet access to whatever a
+  package installer downloads (typosquatted/compromised packages, build-time code execution)
+  -- this is inherent to installing dependencies at all, not something network policy alone
+  can close.
 - LLM tool calls should eventually be validated against a richer policy engine.
 - Dashboard auth supports signed username/password sessions for local dev and GitHub OAuth for deployment.
 - Production preflight requires GitHub OAuth configuration, secure cookies, a session secret, PostgreSQL, durable artifact storage, and disabled demo data.

@@ -37,6 +37,8 @@ def test_dashboard_pages_and_api_load(tmp_path):
         "/security",
         "/feedback",
         "/docs",
+        "/privacy",
+        "/terms",
     ]
     for route in routes:
         response = client.get(route)
@@ -78,6 +80,22 @@ def test_dashboard_auth_redirects_and_login(monkeypatch, tmp_path):
     assert good_login.headers["location"] == "/runs"
     assert "patchpilot_session" in good_login.headers["set-cookie"]
     assert client.get("/runs").status_code == 200
+
+
+def test_privacy_and_terms_are_public_even_with_auth_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("DASHBOARD_AUTH_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_USERNAME", "alex")
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "secret-pass")
+    monkeypatch.setenv("DASHBOARD_SESSION_SECRET", "test-session-secret")
+    client = TestClient(create_app(f"sqlite:///{tmp_path / 'runs.sqlite3'}"))
+
+    privacy = client.get("/privacy")
+    terms = client.get("/terms")
+
+    assert privacy.status_code == 200
+    assert "not been reviewed by a lawyer" in privacy.text
+    assert terms.status_code == 200
+    assert "not been reviewed by a lawyer" in terms.text
 
 
 def test_dashboard_can_queue_run(tmp_path):

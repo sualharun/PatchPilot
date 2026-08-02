@@ -11,7 +11,8 @@ class SandboxSettings:
     image: str = "python:3.11-slim"
     cpu_limit: str = "2"
     memory_limit: str = "2g"
-    network: str = "bridge"
+    network: str = "none"
+    install_network: str = "patchpilot-sandbox-egress"
     install_timeout_seconds: int = 600
     test_timeout_seconds: int = 600
     command_timeout_seconds: int = 300

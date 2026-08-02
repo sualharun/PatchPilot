@@ -52,8 +52,10 @@ class RepoTools:
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr or "Patch did not apply")
 
-    def run_command_in_sandbox(self, command: str, timeout_seconds: int | None = None) -> CommandResult:
-        return self.sandbox.run(self.repo_path, command, timeout_seconds=timeout_seconds)
+    def run_command_in_sandbox(
+        self, command: str, timeout_seconds: int | None = None, *, needs_network: bool = False
+    ) -> CommandResult:
+        return self.sandbox.run(self.repo_path, command, timeout_seconds=timeout_seconds, needs_network=needs_network)
 
     def git_diff(self) -> str:
         completed = subprocess.run(["git", "diff", "--", "."], cwd=self.repo_path, capture_output=True, text=True)

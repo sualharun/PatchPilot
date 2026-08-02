@@ -1,9 +1,11 @@
 """Compatibility imports for infrastructure configuration."""
 
 from .infrastructure.config.settings import (
+    COMMAND_POLICY_VERSION,
     DEFAULT_SAFE_COMMANDS,
     AgentConfig,
     SandboxConfig,
+    load_command_policy,
     load_config,
     load_repo_config,
     validate_config,
@@ -11,9 +13,11 @@ from .infrastructure.config.settings import (
 )
 
 __all__ = [
+    "COMMAND_POLICY_VERSION",
     "DEFAULT_SAFE_COMMANDS",
     "AgentConfig",
     "SandboxConfig",
+    "load_command_policy",
     "load_config",
     "load_repo_config",
     "validate_config",

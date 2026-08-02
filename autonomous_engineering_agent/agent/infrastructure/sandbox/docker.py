@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import subprocess
@@ -16,12 +17,20 @@ class DockerSandbox:
     def __init__(self, config: SandboxConfig) -> None:
         self.config = config
 
-    def run(self, repo_path: Path, command: str, timeout_seconds: int | None = None) -> CommandResult:
+    def run(
+        self,
+        repo_path: Path,
+        command: str,
+        timeout_seconds: int | None = None,
+        *,
+        needs_network: bool = False,
+    ) -> CommandResult:
         repo_path = repo_path.resolve()
         if not repo_path.exists() or not repo_path.is_dir():
             raise ValueError(f"Repository path does not exist: {repo_path}")
         self._ensure_allowed(command)
         docker_mount_path = _host_visible_path(repo_path)
+        network = self._resolve_network(needs_network)
 
         timeout = timeout_seconds or self.config.command_timeout_seconds
         container_name = f"agent-{uuid.uuid4().hex[:12]}"
@@ -36,7 +45,7 @@ class DockerSandbox:
             "--memory",
             self.config.memory_limit,
             "--network",
-            self.config.network,
+            network,
             "-v",
             f"{docker_mount_path}:/workspace",
             "-w",
@@ -67,6 +76,25 @@ class DockerSandbox:
                 exit_code=124,
                 runtime_seconds=runtime,
                 timed_out=True,
+            )
+
+    def _resolve_network(self, needs_network: bool) -> str:
+        """Only commands that explicitly need it (package installs) get outbound network,
+        and only on the dedicated install network -- everything else runs with no network."""
+        if not needs_network:
+            return self.config.network
+        network = self.config.install_network
+        if network not in ("none", "host") and not network.startswith("container:"):
+            self._ensure_network_exists(network)
+        return network
+
+    def _ensure_network_exists(self, name: str) -> None:
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            subprocess.run(
+                ["docker", "network", "create", "--driver", "bridge", name],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
 
     def _ensure_allowed(self, command: str) -> None:

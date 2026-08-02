@@ -230,7 +230,9 @@ class ExecuteEngineeringRunHandler:
 
     def _run_setup(self, tools: RepositoryTools, settings: ExecutionSettings, state: RunState) -> bool:
         for command in settings.install_commands:
-            result = tools.run_command_in_sandbox(command, timeout_seconds=settings.sandbox.install_timeout_seconds)
+            result = tools.run_command_in_sandbox(
+                command, timeout_seconds=settings.sandbox.install_timeout_seconds, needs_network=True
+            )
             self._record_command(state, result, phase="setup")
             if not result.ok:
                 return False

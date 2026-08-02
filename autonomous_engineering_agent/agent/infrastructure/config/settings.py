@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,19 +9,27 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-DEFAULT_SAFE_COMMANDS = {
-    "python",
-    "python3",
-    "pip",
-    "pytest",
-    "coverage",
-    "tox",
-    "nox",
-    "poetry",
-    "pipenv",
-    "unittest",
-    "make",
-}
+COMMAND_POLICY_PATH = Path(__file__).resolve().parents[1] / "sandbox" / "command_policy.json"
+
+
+def load_command_policy(path: Path = COMMAND_POLICY_PATH) -> tuple[int, set[str]]:
+    """Load the checked-in, versioned sandbox command allowlist.
+
+    Keeping this in a reviewed file (instead of a Python literal) means changing what
+    a sandboxed run may execute always shows up as a diff in code review/git history.
+    """
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    version = data.get("version")
+    commands = data.get("allowed_commands")
+    if not isinstance(version, int):
+        raise ValueError(f"Sandbox command policy {path} must set an integer 'version'")
+    if not isinstance(commands, list) or not commands or not all(isinstance(c, str) and c.strip() for c in commands):
+        raise ValueError(f"Sandbox command policy {path} must set a non-empty list of strings for 'allowed_commands'")
+    return version, set(commands)
+
+
+COMMAND_POLICY_VERSION, DEFAULT_SAFE_COMMANDS = load_command_policy()
 
 
 @dataclass(slots=True)
@@ -28,7 +37,12 @@ class SandboxConfig:
     image: str = "python:3.11-slim"
     cpu_limit: str = "2"
     memory_limit: str = "2g"
-    network: str = "bridge"
+    # Default network for commands that don't need internet access (test runs, tool calls).
+    network: str = "none"
+    # Dedicated, isolated network used only for dependency installation. Must not be able to
+    # reach other project containers (postgres, redpanda, the dashboard) or the cloud metadata
+    # endpoint (169.254.169.254) -- see scripts/setup-sandbox-network.sh.
+    install_network: str = "patchpilot-sandbox-egress"
     install_timeout_seconds: int = 600
     test_timeout_seconds: int = 600
     command_timeout_seconds: int = 300
@@ -82,6 +96,7 @@ class AgentConfig:
     kafka_consumer_group: str = "patchpilot-pr-workers"
     pr_analysis_status_context: str = "patchpilot/pr-analysis"
     production: bool = False
+    sentry_dsn: str | None = None
 
 
 def validate_config(config: AgentConfig) -> list[str]:
@@ -168,7 +183,10 @@ def load_config(repo_path: Path | None = None, env_file: Path | None = None) -> 
         image=str(sandbox_raw.get("image", os.getenv("AGENT_DOCKER_IMAGE", "python:3.11-slim"))),
         cpu_limit=str(sandbox_raw.get("cpu_limit", os.getenv("AGENT_CPU_LIMIT", "2"))),
         memory_limit=str(sandbox_raw.get("memory_limit", os.getenv("AGENT_MEMORY_LIMIT", "2g"))),
-        network=str(sandbox_raw.get("network", os.getenv("AGENT_DOCKER_NETWORK", "bridge"))),
+        network=str(sandbox_raw.get("network", os.getenv("AGENT_DOCKER_NETWORK", "none"))),
+        install_network=str(
+            sandbox_raw.get("install_network", os.getenv("AGENT_DOCKER_INSTALL_NETWORK", "patchpilot-sandbox-egress"))
+        ),
         install_timeout_seconds=int(
             sandbox_raw.get("install_timeout_seconds", os.getenv("AGENT_INSTALL_TIMEOUT", 600))
         ),
@@ -225,6 +243,7 @@ def load_config(repo_path: Path | None = None, env_file: Path | None = None) -> 
         kafka_consumer_group=os.getenv("KAFKA_CONSUMER_GROUP", "patchpilot-pr-workers"),
         pr_analysis_status_context=os.getenv("PR_ANALYSIS_STATUS_CONTEXT", "patchpilot/pr-analysis"),
         production=_env_bool("PATCHPILOT_PRODUCTION", default=False),
+        sentry_dsn=os.getenv("SENTRY_DSN"),
     )
     errors = validate_config(config)
     if errors:
@@ -238,6 +257,10 @@ def load_repo_config(repo_path: Path, base_config: AgentConfig) -> AgentConfig:
     repo_config.github_webhook_secret = base_config.github_webhook_secret
     repo_config.openai_api_key = base_config.openai_api_key
     repo_config.anthropic_api_key = base_config.anthropic_api_key
+    # The sandbox's network access and command allowlist are a deployment-controlled security
+    # boundary. A repository's own agent.yaml is untrusted input and must not be able to loosen
+    # it (e.g. requesting the "bridge" network or adding executables to the allowlist).
+    repo_config.sandbox = base_config.sandbox
     if base_config.database_url != "sqlite:///agent_runs.sqlite3":
         repo_config.database_url = base_config.database_url
     if str(base_config.logs_dir) != ".agent-logs":

@@ -162,7 +162,21 @@ cd PatchPilot/autonomous_engineering_agent
 cp .env.vps.example .env
 ```
 
-Fill every production value in `.env`, then run:
+Fill every production value in `.env`, then run once (as root, or with `sudo`) to create the
+isolated network sandboxed package installs run on and block it from reaching the cloud
+metadata endpoint:
+
+```bash
+sudo ./scripts/setup-sandbox-network.sh
+```
+
+This is idempotent -- safe to re-run. Re-run it after any host reboot unless you've set up
+`iptables` rule persistence (the script prints options when it runs). Without this step, the
+sandbox worker will still create the network on first use and non-install commands still get no
+network, but the cloud metadata endpoint will not be blocked for install commands until the
+script has been run.
+
+Then run:
 
 ```bash
 ./scripts/vps-deploy.sh
@@ -185,7 +199,54 @@ https://YOUR_DOMAIN/ready
 https://YOUR_DOMAIN/login
 ```
 
-## 6. First Beta Test
+## 6. Scheduled, Verified Backups
+
+Goal: Postgres backups happen automatically, and a broken backup is caught before you need it.
+
+`scripts/backup-postgres.sh` and `scripts/restore-postgres.sh` exist but nothing runs the backup
+automatically, and nobody proves the backups are actually restorable. Install two systemd timers
+for this (unit files are checked in under `deploy/systemd/`):
+
+```bash
+sudo mkdir -p /opt/patchpilot/backups
+sudo cp deploy/systemd/patchpilot-backup.service deploy/systemd/patchpilot-backup.timer \
+        deploy/systemd/patchpilot-backup-verify.service deploy/systemd/patchpilot-backup-verify.timer \
+        /etc/systemd/system/
+```
+
+Edit `WorkingDirectory=` and `ExecStart=` in the two `.service` files if the repo is not cloned
+at `/opt/patchpilot/app` (adjust to match wherever you ran `git clone` in step 5). Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now patchpilot-backup.timer
+sudo systemctl enable --now patchpilot-backup-verify.timer
+```
+
+What each timer does:
+
+- `patchpilot-backup.timer` (daily, 03:15 UTC) runs `scripts/backup-postgres.sh`, which dumps
+  Postgres to `$BACKUP_DIR` and prunes backups older than `BACKUP_RETENTION_DAYS` (default 14).
+- `patchpilot-backup-verify.timer` (weekly, Sunday 04:00 UTC) runs
+  `scripts/verify-postgres-backup.sh`, which restores the most recent backup into a scratch
+  database (`patchpilot_restore_check`, dropped afterward -- it never touches the live
+  `patchpilot` database), asserts the `runs` table exists and is queryable, and exits non-zero
+  with a message on stdout if anything about the restore fails. A corrupted or empty backup will
+  not sit there silently until the day you need it.
+
+Verify:
+
+```bash
+sudo systemctl list-timers | grep patchpilot
+sudo systemctl start patchpilot-backup.service        # run once immediately to sanity-check
+sudo systemctl start patchpilot-backup-verify.service  # run once immediately to sanity-check
+journalctl -u patchpilot-backup.service -u patchpilot-backup-verify.service --since today
+```
+
+Expected result: both services show `status=0/SUCCESS` and a backup file appears in
+`/opt/patchpilot/backups`.
+
+## 7. First Beta Test
 
 Use a small Python repository you control.
 
@@ -200,16 +261,39 @@ Test sequence:
 7. Confirm no secrets appear in logs.
 8. Confirm provider spend is visible and under cap.
 
-## 7. Invite Users
+## 8. Error Visibility (Sentry)
+
+Goal: find out about unhandled errors from a dashboard, not by grepping log files.
+
+Today the only visibility into the running app is `/health`, `/ready`, and local log files. Sign
+up for a free Sentry account (https://sentry.io -- the free developer tier is enough for a small
+beta) or another Sentry-API-compatible alternative (e.g. self-hosted GlitchTip), create a
+project, and copy its DSN. Set it in `.env`:
+
+```text
+SENTRY_DSN=https://examplePublicKey@o0.ingest.sentry.io/0
+```
+
+Leaving `SENTRY_DSN` unset is a supported choice -- error reporting is a true no-op without it,
+nothing else changes. When set, unhandled exceptions from the dashboard (FastAPI), the issue
+worker (`agent worker`), and the PR worker (`agent pr-worker`) are reported to Sentry. Exception
+text is passed through the same secret-redaction used for logs before it leaves the process.
+
+Verify: trigger an error (e.g. temporarily point `DATABASE_URL` somewhere invalid and hit
+`/ready`, or stop Postgres while a worker is running), then confirm the event shows up in the
+Sentry project within a minute or two. Revert the induced failure afterward.
+
+## 9. Invite Users
 
 Before inviting users:
 
 - Keep beta private and invite-only.
 - Use one workspace.
 - Cap LLM spend.
-- Back up Postgres daily.
-- Review logs daily for the first week.
+- Confirm the backup timers from step 6 are enabled and the last verify run succeeded.
+- Review logs daily for the first week (and set up Sentry per step 8 so you don't have to rely on log-grepping alone).
 - Do not support untrusted public repos until worker isolation is stronger.
+- Read `/privacy` and `/terms` on the deployed dashboard -- they're a first draft, not reviewed by a lawyer. Have them checked before relying on them with real users.
 
 ## Deployment Definition Of Done
 
@@ -224,4 +308,7 @@ PatchPilot is private-beta deployable when:
 - Demo data is disabled.
 - A real GitHub PR/issue run completes end to end.
 - Logs, artifacts, and DB backups are persistent.
+- The daily backup timer and weekly backup-verify timer are enabled and their last runs succeeded.
 - Provider billing caps are configured.
+- `SENTRY_DSN` is set (or you've consciously decided to skip it) so unhandled errors aren't only visible via log-grepping.
+- `/privacy` and `/terms` are live on the dashboard.

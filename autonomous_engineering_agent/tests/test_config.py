@@ -1,6 +1,15 @@
 from pathlib import Path
 
-from agent.config import AgentConfig, SandboxConfig, load_config, validate_config
+from agent.config import (
+    COMMAND_POLICY_VERSION,
+    DEFAULT_SAFE_COMMANDS,
+    AgentConfig,
+    SandboxConfig,
+    load_command_policy,
+    load_config,
+    load_repo_config,
+    validate_config,
+)
 
 
 def test_config_loads_agent_yaml_and_env(tmp_path, monkeypatch):
@@ -43,3 +52,57 @@ def test_validate_config_rejects_non_positive_timeout():
     config = AgentConfig(sandbox=SandboxConfig(test_timeout_seconds=0))
 
     assert "sandbox.test_timeout_seconds must be positive" in validate_config(config)
+
+
+def test_sandbox_defaults_have_no_network_and_versioned_allowlist():
+    config = SandboxConfig()
+
+    assert config.network == "none"
+    assert config.install_network == "patchpilot-sandbox-egress"
+    assert config.allowed_commands == DEFAULT_SAFE_COMMANDS
+    assert COMMAND_POLICY_VERSION >= 1
+
+
+def test_load_command_policy_rejects_missing_version(tmp_path):
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text('{"allowed_commands": ["python"]}', encoding="utf-8")
+
+    try:
+        load_command_policy(policy_path)
+    except ValueError as exc:
+        assert "version" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_load_command_policy_rejects_empty_allowlist(tmp_path):
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text('{"version": 1, "allowed_commands": []}', encoding="utf-8")
+
+    try:
+        load_command_policy(policy_path)
+    except ValueError as exc:
+        assert "allowed_commands" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_repo_agent_yaml_cannot_loosen_sandbox_policy(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "agent.yaml").write_text(
+        """
+sandbox:
+  network: bridge
+  allowed_commands:
+    - bash
+""",
+        encoding="utf-8",
+    )
+    base_config = AgentConfig()
+
+    repo_config = load_repo_config(repo, base_config)
+
+    assert repo_config.sandbox == base_config.sandbox
+    assert repo_config.sandbox.network == "none"
+    assert "bash" not in repo_config.sandbox.allowed_commands

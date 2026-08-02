@@ -31,6 +31,7 @@ from agent.domain.services import parse_issue_ref
 from agent.infrastructure.clock import SystemClock
 from agent.infrastructure.config.settings import load_config
 from agent.infrastructure.kafka import KafkaPRJobProducer
+from agent.infrastructure.observability import init_sentry
 from agent.infrastructure.security import RateLimiter, verify_github_signature
 from agent.infrastructure.stripe import StripeClient, verify_stripe_signature
 
@@ -53,6 +54,7 @@ def _enforce_rate_limit(limiter: RateLimiter, request: Request, *, detail: str) 
 
 def create_app(database_url: str | None = None) -> FastAPI:
     config = load_config()
+    init_sentry(config.sentry_dsn, environment="production" if config.production else "development")
     container = build_application(database_url=database_url, config=config)
     queries = container.queries
     _seed_runtime_state(container, config)
@@ -381,7 +383,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     <button class="button primary full" type="submit">Continue</button>
     <a class="button secondary full" href="/">Back to home</a>
     <p class="fine-print">Audit logs, scoped GitHub tokens, and Docker-isolated repo execution are built into every run.</p>
-    <div class="link-row"><a href="/demo">Watch demo</a><a href="/docs">Docs</a><a href="/runs">Dashboard</a></div>
+    <div class="link-row"><a href="/demo">Watch demo</a><a href="/docs">Docs</a><a href="/runs">Dashboard</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div>
   </form>
 </main>
 """,
@@ -895,6 +897,14 @@ E     + where False = &lt;Response [503]&gt;.ok
             _docs_content(),
         )
 
+    @app.get("/privacy", response_class=HTMLResponse)
+    def privacy():
+        return _page("Privacy Policy", _privacy_content(), nav_active="privacy")
+
+    @app.get("/terms", response_class=HTMLResponse)
+    def terms():
+        return _page("Terms of Service", _terms_content(), nav_active="terms")
+
     return app
 
 
@@ -954,6 +964,15 @@ def _page(title: str, body: str, *, nav_active: str, show_top_nav: bool = True, 
         if show_top_nav
         else ""
     )
+    footer = (
+        """
+    <footer style="text-align:center;padding:24px;font-size:13px;opacity:0.7;">
+      <a href="/privacy" style="color:inherit;">Privacy</a> &middot; <a href="/terms" style="color:inherit;">Terms</a>
+    </footer>
+"""
+        if show_top_nav
+        else ""
+    )
     return f"""
 <!doctype html>
 <html lang="en">
@@ -967,6 +986,7 @@ def _page(title: str, body: str, *, nav_active: str, show_top_nav: bool = True, 
   <body class="{body_class}">
     {nav}
     {body}
+    {footer}
     <script defer src="/static/app.js?v=2026071902"></script>
   </body>
 </html>
@@ -1417,6 +1437,80 @@ DATABASE_URL=sqlite:///agent_runs.sqlite3</pre></article>
 """
 
 
+_LEGAL_DOC_STYLE = """
+<style>
+  .legal-doc { max-width: 760px; margin: 0 auto; padding: 48px 24px 96px; line-height: 1.6; }
+  .legal-doc h1 { font-size: 28px; margin: 0 0 4px; }
+  .legal-doc .legal-updated { color: var(--muted, #777); margin: 0 0 24px; font-size: 14px; }
+  .legal-doc .legal-notice { background: rgba(255, 176, 32, 0.12); border: 1px solid rgba(255, 176, 32, 0.4); border-radius: 8px; padding: 14px 16px; margin: 0 0 32px; font-size: 14px; }
+  .legal-doc h2 { font-size: 18px; margin: 32px 0 10px; }
+  .legal-doc p { margin: 0 0 12px; font-size: 15px; }
+  .legal-doc ul { margin: 0 0 12px; padding-left: 22px; }
+  .legal-doc li { margin: 0 0 6px; font-size: 15px; }
+  .legal-doc a { color: inherit; }
+</style>
+"""
+
+
+def _privacy_content() -> str:
+    return f"""
+{_LEGAL_DOC_STYLE}
+<main class="legal-doc">
+  <h1>Privacy Policy</h1>
+  <p class="legal-updated">Last updated 2026-08-02</p>
+  <p class="legal-notice"><strong>Draft, not legal advice.</strong> This page is a first draft written to be plain and accurate about what PatchPilot actually does today. It has not been reviewed by a lawyer. Have it checked before relying on it with real users.</p>
+
+  <h2>What we store about you</h2>
+  <p>When you sign in with GitHub OAuth, we store your GitHub user ID, login (username), and avatar URL, plus a signed session cookie used to keep you logged in. We do not receive or store your GitHub password.</p>
+
+  <h2>What the GitHub App can access</h2>
+  <p>The PatchPilot GitHub App only accesses repositories it has been explicitly installed on and granted access to -- installing it on one repository does not give it access to any others. Its permissions are scoped to what it needs to do its job: read issues, read repository metadata, write repository contents (to push a fix branch), and write pull requests (to open a draft PR).</p>
+
+  <h2>What gets sent to a third-party LLM provider</h2>
+  <p>To analyze an issue and propose a fix, PatchPilot sends relevant repository content (file contents, issue text, diffs, command output) to a third-party large language model provider -- OpenAI or Anthropic, depending on which model is configured -- for processing. That provider's own privacy policy and data-handling terms apply to what happens to that data on their side.</p>
+
+  <h2>How long we keep run and log data</h2>
+  <p>Run records (status, commands executed, test results, token usage, patches produced) and log/artifact files are retained so runs stay debuggable and auditable. As of this writing there is no automated expiry -- data is kept indefinitely unless manually deleted. If that changes, this page will be updated.</p>
+
+  <h2>Billing</h2>
+  <p>If billing is enabled, Stripe processes payments and handles your payment details directly -- PatchPilot does not receive or store your card number. We store the minimum billing metadata needed to associate your workspace with a Stripe customer and subscription (e.g. plan tier, subscription status).</p>
+
+  <h2>Questions</h2>
+  <p>This is an early private beta. If you have questions about data handling, contact the person who invited you.</p>
+</main>
+"""
+
+
+def _terms_content() -> str:
+    return f"""
+{_LEGAL_DOC_STYLE}
+<main class="legal-doc">
+  <h1>Terms of Service</h1>
+  <p class="legal-updated">Last updated 2026-08-02</p>
+  <p class="legal-notice"><strong>Draft, not legal advice.</strong> This page is a first draft and has not been reviewed by a lawyer. Have it checked before relying on it with real users.</p>
+
+  <h2>Beta software</h2>
+  <p>PatchPilot is private-beta software. It autonomously edits code, runs commands in a sandboxed environment, and can open pull requests on repositories you connect. You are responsible for reviewing any pull request before merging it -- PatchPilot does not guarantee correctness.</p>
+
+  <h2>Your responsibilities</h2>
+  <ul>
+    <li>Only connect repositories you have the right to grant PatchPilot access to.</li>
+    <li>Review generated pull requests before merging; PatchPilot's output is not a substitute for code review.</li>
+    <li>Keep any API keys and credentials you provide (GitHub, OpenAI, Anthropic, Stripe) confidential.</li>
+  </ul>
+
+  <h2>Third-party services</h2>
+  <p>PatchPilot relies on third-party services -- GitHub, an LLM provider (OpenAI or Anthropic), and, if billing is enabled, Stripe -- to function. Your use of PatchPilot is also subject to those providers' own terms.</p>
+
+  <h2>No warranty</h2>
+  <p>PatchPilot is provided during a private beta on an "as is" basis, without warranty of any kind, express or implied.</p>
+
+  <h2>Changes</h2>
+  <p>These terms may change as the product changes during the beta. Material changes will be reflected on this page.</p>
+</main>
+"""
+
+
 def _db_run_detail_content(run: dict) -> str:
     commands = run.get("commands") or []
     tool_calls = run.get("tool_calls") or []
@@ -1848,6 +1942,8 @@ def _is_public_path(path: str) -> bool:
         or path == "/webhooks/stripe"
         or path == "/health"
         or path == "/ready"
+        or path == "/privacy"
+        or path == "/terms"
         or path.startswith("/static/")
     )
 
