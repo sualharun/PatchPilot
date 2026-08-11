@@ -41,7 +41,10 @@ where = ["."]
 include = ["agent*"]
 
 [tool.setuptools.package-data]
-agent = ["static/**/*"]
+# command_policy.json is read at import time by settings.load_command_policy();
+# omitting it here makes an installed wheel fail to start even though the file
+# exists in the source tree.
+agent = ["static/**/*", "infrastructure/sandbox/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
