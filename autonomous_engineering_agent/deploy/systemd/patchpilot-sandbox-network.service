@@ -1,0 +1,19 @@
+[Unit]
+Description=PatchPilot sandbox egress network and cloud-metadata block
+Documentation=file:///opt/patchpilot/app/scripts/setup-sandbox-network.sh
+# setup-sandbox-network.sh adds an iptables DOCKER-USER rule that stops sandboxed
+# package installs from reaching the cloud metadata endpoint. That rule does not
+# survive a reboot, so without this unit the protection silently disappears the
+# next time the host restarts. The script is idempotent, so re-running is safe.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Adjust to wherever the repo is actually cloned on this host.
+WorkingDirectory=/opt/patchpilot/app
+ExecStart=/opt/patchpilot/app/scripts/setup-sandbox-network.sh
+
+[Install]
+WantedBy=multi-user.target
