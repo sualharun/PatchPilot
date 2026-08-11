@@ -95,15 +95,42 @@ Everything else lines up roughly one-to-one with real time.
 
 ## 4. If the live run misbehaves
 
-Check the diff before committing to a take. `gpt-4o-mini` reliably produces the correct
-one-line fix but occasionally rewrites the file and drops the module docstring, which adds
-noise to the diff you are about to show. Re-run, or switch the model to `gpt-4.1`.
+**Always look at the diff before committing to a take.** A verified good run is one file,
+one line, four tests passing, in about sixty seconds. Anything else, reset and re-run —
+generation is nondeterministic.
 
-If a run fails outright on camera, do not fight it. Cut to a completed run in `/runs` and
-carry on — the narration never claims you are watching it live.
+Observed failure modes while making this demo reliable, and what each looks like:
+
+| What you see | What happened | Do |
+| --- | --- | --- |
+| Diff touches `tests/` | The model "fixed" the suite by deleting tests | Reset, re-run. Never ship this one. |
+| `failed_tests`, syntax error in output | Patch mangled the file | Reset, re-run |
+| `dead_letter`, "No valid patches in input" | Patch format was rejected outright | Reset, re-run. Seen with `gpt-4.1`; stay on `gpt-4o-mini`. |
+| Redirect to `/billing?limit=...` | Monthly run cap | Raise the workspace's cap (see below) |
+
+Stay on **`gpt-4o-mini`**. It is both cheaper and, on this repo, more reliable than
+`gpt-4.1`, whose patches were rejected outright.
+
+Two things about the target repo exist specifically for reliability: `pricing.py` uses
+line comments rather than triple-quoted docstrings, because patch generation repeatedly
+mangled the docstrings into syntax errors; and `conftest.py` exists so bare `pytest`
+can import the module.
 
 Reset and try again as many times as you like:
 
 ```bash
 ./reset-demo.sh
 ```
+
+### Run cap
+
+The free plan allows five runs a month, and the demo will refuse to queue past that. The
+workspaces on the live instance are set to `pro` (250 runs). If it ever bites again:
+
+```sql
+UPDATE subscriptions SET plan='pro', status='active' WHERE workspace_id = <id>;
+UPDATE workspace_limits SET plan='pro', monthly_run_cap=250 WHERE workspace_id = <id>;
+```
+
+Both rows are needed — `effective_plan()` only honours a paid plan while a subscription
+is `active` or `trialing`.
