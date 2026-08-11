@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -220,6 +221,38 @@ class RunStore:
         user_id = self._insert_generic("users", {"email": email, "name": name, "created_at": _now()})
         return self._fetch_one("SELECT * FROM users WHERE id = ?", [user_id]) or {}
 
+    def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        return self._fetch_one("SELECT * FROM users WHERE email = ?", [email])
+
+    def create_password_user(self, *, email: str, name: str, password_hash: str) -> dict[str, Any]:
+        """Create a self-service account with its own workspace.
+
+        The workspace slug is deduplicated instead of reusing an existing
+        workspace: joining another tenant's workspace on slug collision would
+        leak their runs and billing to the new signup.
+        """
+        if self.get_user_by_email(email):
+            raise ValueError("email already registered")
+        user_id = self._insert_generic(
+            "users",
+            {
+                "email": email,
+                "name": name,
+                "login": email,
+                "password_hash": password_hash,
+                "created_at": _now(),
+            },
+        )
+        base_slug = re.sub(r"[^a-z0-9-]", "-", email.split("@", 1)[0].lower()).strip("-") or "workspace"
+        slug = base_slug
+        suffix = 2
+        while self._fetch_one("SELECT id FROM workspaces WHERE slug = ?", [slug]):
+            slug = f"{base_slug}-{suffix}"
+            suffix += 1
+        workspace_id = self._insert_generic("workspaces", {"name": name, "slug": slug, "created_at": _now()})
+        self.ensure_membership(user_id, workspace_id, role="owner")
+        return self._fetch_one("SELECT * FROM users WHERE id = ?", [user_id]) or {}
+
     def upsert_user_from_github(
         self,
         *,
@@ -257,6 +290,42 @@ class RunStore:
 
     def get_user_by_login(self, login: str) -> dict[str, Any] | None:
         return self._fetch_one("SELECT * FROM users WHERE login = ?", [login])
+
+    def set_user_password(self, *, user_id: int, password_hash: str) -> None:
+        self._execute("UPDATE users SET password_hash = ? WHERE id = ?", [password_hash, user_id])
+
+    def set_onboarding_completed(self, *, user_id: int) -> None:
+        self._execute("UPDATE users SET onboarding_completed_at = ? WHERE id = ?", [_now(), user_id])
+
+    def add_email_verification_token(self, *, user_id: int, token_hash: str, expires_at: str) -> int:
+        return self._insert_generic(
+            "email_verification_tokens",
+            {
+                "user_id": user_id,
+                "token_hash": token_hash,
+                "expires_at": expires_at,
+                "created_at": _now(),
+            },
+        )
+
+    def consume_email_verification_token(self, token_hash: str) -> dict[str, Any] | None:
+        """Mark a token used and verify its user. Returns the user, or None if unusable."""
+        row = self._fetch_one(
+            "SELECT * FROM email_verification_tokens WHERE token_hash = ?", [token_hash]
+        )
+        if not row or row.get("consumed_at") or str(row.get("expires_at") or "") < _now():
+            return None
+        self._execute(
+            "UPDATE email_verification_tokens SET consumed_at = ? WHERE id = ?", [_now(), int(row["id"])]
+        )
+        self._execute("UPDATE users SET email_verified_at = ? WHERE id = ?", [_now(), int(row["user_id"])])
+        return self._fetch_one("SELECT * FROM users WHERE id = ?", [int(row["user_id"])])
+
+    def update_user_email(self, *, user_id: int, email: str, update_login: bool) -> None:
+        if update_login:
+            self._execute("UPDATE users SET email = ?, login = ? WHERE id = ?", [email, email, user_id])
+        else:
+            self._execute("UPDATE users SET email = ? WHERE id = ?", [email, user_id])
 
     def workspace_for_login(self, login: str | None) -> dict[str, Any] | None:
         """The workspace tied to a login/installation account.
@@ -821,8 +890,29 @@ class RunStore:
             [],
         )
         self._ensure_columns(
-            {"github_user_id": "TEXT", "login": "TEXT", "avatar_url": "TEXT"},
+            {
+                "github_user_id": "TEXT",
+                "login": "TEXT",
+                "avatar_url": "TEXT",
+                "password_hash": "TEXT",
+                "onboarding_completed_at": "TEXT",
+                "email_verified_at": "TEXT",
+            },
             table="users",
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_verification_tokens (
+              id INTEGER PRIMARY KEY,
+              user_id INTEGER NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              expires_at TEXT NOT NULL,
+              consumed_at TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """,
+            [],
         )
         self._execute(
             """

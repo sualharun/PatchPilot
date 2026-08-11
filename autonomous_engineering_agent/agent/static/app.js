@@ -249,7 +249,121 @@ function initSectionTabs() {
   if (current) activate(current);
 }
 
+const TOUR_STORAGE_KEY = "patchpilot.tour.dismissed";
+
+// Ordered by importance: the first two steps that resolve on the page are shown.
+const TOUR_STEPS = [
+  {
+    selector: "#runs-table-body, #recent-runs",
+    title: "Your runs live here",
+    body: "Every run records its commands, test output, patch, and cost. Open one to follow the agent step by step.",
+  },
+  {
+    selector: "[data-tour='start-run'], #start-run",
+    title: "Start a run",
+    body: "Paste a GitHub issue URL, pick a model, and PatchPilot plans a fix and runs your tests in a sandbox.",
+  },
+  {
+    selector: "[data-tour='settings'], a[href='/settings#providers']",
+    title: "Configure your API key",
+    body: "Settings holds your provider keys, GitHub App status, and run policy. Test a key before your first run.",
+  },
+];
+
+function tourDismissed() {
+  try {
+    return window.localStorage.getItem(TOUR_STORAGE_KEY) === "1";
+  } catch (error) {
+    return true; // Storage blocked: never nag on every page load.
+  }
+}
+
+function dismissTour() {
+  try {
+    window.localStorage.setItem(TOUR_STORAGE_KEY, "1");
+  } catch (error) {
+    /* storage unavailable; the tour simply reappears next visit */
+  }
+}
+
+function initTour() {
+  if (tourDismissed()) return;
+  const steps = TOUR_STEPS.map((step) => ({
+    ...step,
+    target: document.querySelector(step.selector),
+  })).filter((step) => step.target);
+  if (!steps.length) return;
+
+  let index = 0;
+  const bubble = document.createElement("div");
+  bubble.className = "tour-bubble";
+  bubble.setAttribute("role", "dialog");
+  bubble.setAttribute("aria-label", "Product tour");
+  document.body.appendChild(bubble);
+
+  function close() {
+    dismissTour();
+    bubble.remove();
+    steps.forEach((step) => step.target.classList.remove("tour-highlight"));
+    window.removeEventListener("resize", place);
+    window.removeEventListener("scroll", place);
+  }
+
+  function place() {
+    const { target } = steps[index];
+    const box = target.getBoundingClientRect();
+    const top = window.scrollY + box.bottom + 12;
+    const left = Math.max(12, Math.min(window.scrollX + box.left, window.scrollX + window.innerWidth - 340));
+    bubble.style.top = `${top}px`;
+    bubble.style.left = `${left}px`;
+  }
+
+  function render() {
+    const step = steps[index];
+    steps.forEach((other) => other.target.classList.remove("tour-highlight"));
+    step.target.classList.add("tour-highlight");
+    bubble.innerHTML = "";
+
+    const heading = document.createElement("h3");
+    heading.textContent = step.title;
+    const body = document.createElement("p");
+    body.textContent = step.body;
+    const footer = document.createElement("div");
+    footer.className = "tour-actions";
+
+    const progress = document.createElement("small");
+    progress.textContent = `${index + 1} of ${steps.length}`;
+    const skip = document.createElement("button");
+    skip.type = "button";
+    skip.className = "button outline";
+    skip.textContent = "Skip";
+    skip.addEventListener("click", close);
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "button primary";
+    next.textContent = index === steps.length - 1 ? "Done" : "Next";
+    next.addEventListener("click", () => {
+      if (index === steps.length - 1) {
+        close();
+        return;
+      }
+      index += 1;
+      render();
+    });
+
+    footer.append(progress, skip, next);
+    bubble.append(heading, body, footer);
+    place();
+    step.target.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  window.addEventListener("resize", place);
+  window.addEventListener("scroll", place, { passive: true });
+  render();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initRunFilters();
   initSectionTabs();
+  initTour();
 });

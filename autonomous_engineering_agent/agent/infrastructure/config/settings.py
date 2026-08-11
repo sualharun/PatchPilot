@@ -63,11 +63,20 @@ class AgentConfig:
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     dashboard_auth_enabled: bool = False
+    dashboard_auth_mode: str = "both"  # password | github-oauth | both
     dashboard_username: str = "admin"
     dashboard_password: str | None = None
     dashboard_session_secret: str | None = None
     dashboard_secure_cookies: bool = False
     dashboard_demo_data_enabled: bool = True
+    dashboard_onboarding_enabled: bool = True
+    dashboard_require_email_verification: bool = False
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_address: str = "no-reply@patchpilot.local"
+    smtp_use_tls: bool = True
     github_oauth_client_id: str | None = None
     github_oauth_client_secret: str | None = None
     github_oauth_callback_url: str | None = None
@@ -121,6 +130,8 @@ def validate_config(config: AgentConfig) -> list[str]:
         errors.append("sandbox.image must not be empty")
     if not config.sandbox.allowed_commands:
         errors.append("sandbox.allowed_commands must contain at least one command")
+    if config.dashboard_auth_mode not in {"password", "github-oauth", "both"}:
+        errors.append("DASHBOARD_AUTH_MODE must be one of: password, github-oauth, both")
     for field_name, commands in (("install_commands", config.install_commands), ("test_commands", config.test_commands)):
         for command in commands:
             if not isinstance(command, str) or not command.strip():
@@ -141,11 +152,17 @@ def validate_production_config(config: AgentConfig) -> list[str]:
         errors.append("DASHBOARD_SESSION_SECRET is required in production")
     if not config.dashboard_secure_cookies:
         errors.append("DASHBOARD_SECURE_COOKIES must be true in production")
-    if not (config.github_oauth_client_id and config.github_oauth_client_secret and config.github_oauth_callback_url):
+    if config.dashboard_auth_mode != "password" and not (
+        config.github_oauth_client_id and config.github_oauth_client_secret and config.github_oauth_callback_url
+    ):
         errors.append(
             "GitHub OAuth credentials are required in production "
             "(GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET, GITHUB_OAUTH_CALLBACK_URL)"
         )
+    if config.dashboard_auth_mode != "github-oauth" and not config.dashboard_password:
+        # A password-mode deployment without DASHBOARD_PASSWORD locks everyone
+        # out on first boot: no admin login and no signup accounts exist yet.
+        errors.append("DASHBOARD_PASSWORD is required in production unless DASHBOARD_AUTH_MODE=github-oauth")
     if config.github_oauth_mock_enabled:
         errors.append("GITHUB_OAUTH_MOCK_ENABLED must be false in production")
     has_app_key = bool(config.github_app_private_key or config.github_app_private_key_path)
@@ -210,11 +227,20 @@ def load_config(repo_path: Path | None = None, env_file: Path | None = None) -> 
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
         dashboard_auth_enabled=_env_bool("DASHBOARD_AUTH_ENABLED", default=False),
+        dashboard_auth_mode=os.getenv("DASHBOARD_AUTH_MODE", "both").strip().lower(),
         dashboard_username=os.getenv("DASHBOARD_USERNAME", "admin"),
         dashboard_password=os.getenv("DASHBOARD_PASSWORD"),
         dashboard_session_secret=os.getenv("DASHBOARD_SESSION_SECRET"),
         dashboard_secure_cookies=_env_bool("DASHBOARD_SECURE_COOKIES", default=False),
         dashboard_demo_data_enabled=_env_bool("DASHBOARD_DEMO_DATA_ENABLED", default=True),
+        dashboard_onboarding_enabled=_env_bool("DASHBOARD_ONBOARDING_ENABLED", default=True),
+        dashboard_require_email_verification=_env_bool("DASHBOARD_REQUIRE_EMAIL_VERIFICATION", default=False),
+        smtp_host=os.getenv("SMTP_HOST") or None,
+        smtp_port=int(os.getenv("SMTP_PORT", "587")),
+        smtp_username=os.getenv("SMTP_USERNAME") or None,
+        smtp_password=os.getenv("SMTP_PASSWORD") or None,
+        smtp_from_address=os.getenv("SMTP_FROM_ADDRESS", "no-reply@patchpilot.local"),
+        smtp_use_tls=_env_bool("SMTP_USE_TLS", default=True),
         github_oauth_client_id=os.getenv("GITHUB_OAUTH_CLIENT_ID"),
         github_oauth_client_secret=os.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
         github_oauth_callback_url=os.getenv("GITHUB_OAUTH_CALLBACK_URL"),
