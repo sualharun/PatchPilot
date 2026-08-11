@@ -16,15 +16,13 @@ of its four tests fail because of it. The fix is one character. That matters for
 
 ## One-time setup
 
-**Grant the GitHub App access to the demo repo.** This is required once; without it the
-agent can clone and patch but cannot push, and the run dead-letters with a 403.
+**Done.** The GitHub App has been granted access to `patchpilot-demo`, and the full run
+has been verified end to end on production: 60 seconds from queue to open pull request,
+one file changed, all four tests passing.
 
-1. Open https://github.com/settings/installations/149688471
-2. Under *Repository access*, add `patchpilot-demo` (or select "All repositories")
-3. Save
-
-Verify by queueing one run and confirming a PR appears. Everything else below assumes
-this is done.
+If you ever point the demo at a different repo, you must grant the app access to it first
+at https://github.com/settings/installations/149688471 — otherwise the agent clones and
+patches fine but fails to push, and the run dead-letters with a 403.
 
 ---
 
@@ -155,6 +153,12 @@ that turn to mush at small sizes on a shrunken video player.
 
 **The cost figure is a real number.** Around $0.002 per run. Say it — it lands well and it
 is genuinely verifiable from the dashboard.
+
+**Check the diff before you commit to a take.** `gpt-4o-mini` reliably produces the correct
+one-line fix, but it sometimes rewrites the file and drops the module docstring along the
+way — harmless, but it adds noise to a diff you are about to put on screen. If the diff is
+not clean, either re-run (it is nondeterministic) or switch the model to `gpt-4.1`, which
+holds the surrounding file steady. A verified run took **60 seconds** end to end.
 
 ---
 
