@@ -80,3 +80,19 @@ def test_tracked_files_are_still_committed_even_if_they_match_a_pattern(tmp_path
 
     committed = _git(workspace.path, "show", "--name-only", "--pretty=format:", "HEAD").split()
     assert "node_modules/vendored.js" in committed
+
+
+def test_write_file_ends_with_a_newline(tmp_path):
+    """Models omit the trailing newline; without one every rewrite dirties the diff."""
+    from agent.infrastructure.repository.tools import RepoTools
+
+    tools = RepoTools(repo_path=tmp_path, sandbox=None)
+
+    tools.write_file("a.py", "x = 1")
+    assert (tmp_path / "a.py").read_text() == "x = 1\n"
+
+    tools.write_file("b.py", "x = 1\n")
+    assert (tmp_path / "b.py").read_text() == "x = 1\n", "must not double up"
+
+    tools.write_file("c.py", "")
+    assert (tmp_path / "c.py").read_text() == "", "an empty file stays empty"

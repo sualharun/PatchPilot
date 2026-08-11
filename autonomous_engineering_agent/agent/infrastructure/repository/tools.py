@@ -27,6 +27,12 @@ class RepoTools:
     def write_file(self, relative_path: str, content: str) -> None:
         path = self._safe_path(relative_path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Models routinely omit the trailing newline. Without this every rewritten
+        # file shows "\ No newline at end of file" and its last line reads as
+        # changed, adding noise to the diff a human has to review. Empty files are
+        # left empty rather than becoming a stray blank line.
+        if content and not content.endswith("\n"):
+            content += "\n"
         path.write_text(content, encoding="utf-8")
 
     def search_text(self, pattern: str) -> str:
