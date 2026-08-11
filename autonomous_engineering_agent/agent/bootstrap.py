@@ -9,10 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent.application.commands.dashboard import (
+    ChangePasswordHandler,
+    CompleteOnboardingHandler,
     ConnectGitHubAccountHandler,
+    CreateAccountHandler,
     RecordAuditHandler,
     SeedRuntimeStateHandler,
+    SendVerificationEmailHandler,
     SyncGitHubRepositoriesHandler,
+    UpdateEmailHandler,
+    VerifyEmailHandler,
     VerifyGitHubRepositoryHandler,
 )
 from agent.application.commands.handle_pr_webhook import EnqueuePullRequestAnalysisHandler
@@ -39,6 +45,7 @@ from agent.infrastructure.db.repositories import (
     SqlRunRepository,
     SqlWebhookDeliveryRepository,
 )
+from agent.infrastructure.email import SmtpMailer
 from agent.infrastructure.kafka import KafkaPRJobProducer
 from agent.persistence import RunStore
 
@@ -61,6 +68,12 @@ class ApplicationContainer:
     queue_run: QueueRunHandler
     enqueue_pr_analysis: EnqueuePullRequestAnalysisHandler
     record_audit: RecordAuditHandler
+    create_account: CreateAccountHandler
+    change_password: ChangePasswordHandler
+    update_email: UpdateEmailHandler
+    complete_onboarding: CompleteOnboardingHandler
+    send_verification_email: SendVerificationEmailHandler
+    verify_email: VerifyEmailHandler
     connect_github_account: ConnectGitHubAccountHandler
     sync_github_repositories: SyncGitHubRepositoriesHandler
     verify_github_repository: VerifyGitHubRepositoryHandler
@@ -94,6 +107,14 @@ def build_application(
     billing_repository = SqlBillingRepository(store)
     github = GitHubClient(settings.github_token)
     clock = SystemClock()
+    mailer = SmtpMailer(
+        host=settings.smtp_host,
+        port=settings.smtp_port,
+        username=settings.smtp_username,
+        password=settings.smtp_password,
+        from_address=settings.smtp_from_address,
+        use_tls=settings.smtp_use_tls,
+    )
     queries = DashboardQueryService(
         runs=runs,
         audit_log=audit_log,
@@ -127,6 +148,12 @@ def build_application(
         queue_run=QueueRunHandler(runs, audit_log, clock),
         enqueue_pr_analysis=EnqueuePullRequestAnalysisHandler(KafkaPRJobProducer(settings), audit_log, clock),
         record_audit=RecordAuditHandler(audit_log),
+        create_account=CreateAccountHandler(accounts, audit_log),
+        change_password=ChangePasswordHandler(accounts, audit_log),
+        update_email=UpdateEmailHandler(accounts, audit_log),
+        complete_onboarding=CompleteOnboardingHandler(accounts, audit_log),
+        send_verification_email=SendVerificationEmailHandler(accounts, audit_log, mailer),
+        verify_email=VerifyEmailHandler(accounts, audit_log),
         connect_github_account=ConnectGitHubAccountHandler(accounts, github_connections, audit_log),
         sync_github_repositories=SyncGitHubRepositoriesHandler(github, accounts, repositories),
         verify_github_repository=VerifyGitHubRepositoryHandler(github, accounts, repositories),

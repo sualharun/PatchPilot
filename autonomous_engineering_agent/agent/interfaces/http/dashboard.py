@@ -14,7 +14,18 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from agent.application.commands.dashboard import ConnectGitHubAccountCommand, RecordAuditCommand
+from agent.application.commands.dashboard import (
+    AccountError,
+    ChangePasswordCommand,
+    CompleteOnboardingCommand,
+    ConnectGitHubAccountCommand,
+    CreateAccountCommand,
+    RecordAuditCommand,
+    SendVerificationEmailCommand,
+    SignupError,
+    UpdateEmailCommand,
+    VerifyEmailCommand,
+)
 from agent.application.commands.handle_github_app_webhook import (
     GitHubAppWebhookCommand,
     GitHubAppWebhookSettings,
@@ -26,11 +37,14 @@ from agent.application.commands.handle_pr_webhook import (
 )
 from agent.application.commands.queue_run import QueueRunCommand
 from agent.application.queries.dashboard import calculate_run_stats
+from agent.application.services.passwords import verify_password
 from agent.bootstrap import build_application
 from agent.domain.services import parse_issue_ref
 from agent.infrastructure.clock import SystemClock
 from agent.infrastructure.config.settings import load_config
 from agent.infrastructure.kafka import KafkaPRJobProducer
+from agent.infrastructure.llm.pricing import estimate_cost_usd
+from agent.infrastructure.llm.verify import verify_provider_key
 from agent.infrastructure.observability import init_sentry
 from agent.infrastructure.security import RateLimiter, verify_github_signature
 from agent.infrastructure.stripe import StripeClient, verify_stripe_signature
@@ -40,6 +54,7 @@ SESSION_TTL_SECONDS = 60 * 60 * 12
 
 # Per-process fixed-window limiters; see infrastructure/security/rate_limit.py for the trade-off.
 _LOGIN_RATE_LIMITER = RateLimiter(max_requests=10, window_seconds=300)
+_SIGNUP_RATE_LIMITER = RateLimiter(max_requests=5, window_seconds=3600)
 _QUEUE_RUN_RATE_LIMITER = RateLimiter(max_requests=20, window_seconds=3600)
 
 
@@ -359,10 +374,19 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/login", response_class=HTMLResponse)
     def login(request: Request, next: str = "/runs"):
         error = request.query_params.get("error")
-        github_login = (
-            '<a class="button primary full" href="/auth/github/start">Continue with GitHub</a>'
-            if _github_oauth_enabled(config)
-            else '<p class="fine-print">GitHub OAuth is not configured. Set GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET, and GITHUB_OAUTH_CALLBACK_URL.</p>'
+        if _oauth_login_enabled(config):
+            github_login = '<a class="button primary full" href="/auth/github/start">Continue with GitHub</a>'
+        elif config.dashboard_auth_mode != "password":
+            github_login = '<p class="fine-print">GitHub OAuth is not configured. Set GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET, and GITHUB_OAUTH_CALLBACK_URL.</p>'
+        else:
+            github_login = ""
+        password_login = (
+            f"""<label>Email or username<input name="username" autocomplete="username" value="{_escape_attr(config.dashboard_username)}"></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Dashboard password"></label>
+    <button class="button primary full" type="submit">Continue</button>
+    <a class="button secondary full" href="/signup">Create an account</a>"""
+            if _password_login_enabled(config)
+            else ""
         )
         return _page(
             "Sign in",
@@ -377,22 +401,78 @@ def create_app(database_url: str | None = None) -> FastAPI:
     <input type="hidden" name="next_path" value="{_escape_attr(next)}">
     <input type="hidden" name="csrf_token" value="{_csrf_token(request, config)}">
     {_login_error(error)}
+    {'<p class="fine-print">Account created — sign in below.</p>' if request.query_params.get("created") else ""}
     {github_login}
-    <label>Username<input name="username" autocomplete="username" value="{_escape_attr(config.dashboard_username)}"></label>
-    <label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Dashboard password"></label>
-    <button class="button primary full" type="submit">Continue</button>
+    {password_login}
     <a class="button secondary full" href="/">Back to home</a>
     <p class="fine-print">Audit logs, scoped GitHub tokens, and Docker-isolated repo execution are built into every run.</p>
-    <div class="link-row"><a href="/demo">Watch demo</a><a href="/docs">Docs</a><a href="/runs">Dashboard</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div>
+    <div class="link-row"><a href="/demo">Watch demo</a><a href="/docs">Docs</a><a href="/faq">FAQ</a><a href="/runs">Dashboard</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div>
   </form>
 </main>
 """,
             nav_active="login",
         )
 
+    @app.get("/signup", response_class=HTMLResponse)
+    def signup(request: Request):
+        if not _password_login_enabled(config):
+            return RedirectResponse("/login", status_code=303)
+        error = request.query_params.get("error")
+        return _page(
+            "Create account",
+            f"""
+<main class="auth-shell">
+  <section class="auth-preview">
+    <img src="/static/ui/login.png" alt="PatchPilot login UI mockup">
+  </section>
+  <form class="auth-panel" method="post" action="/signup">
+    <p class="eyebrow">Secure workspace</p>
+    <h1>Create your PatchPilot account</h1>
+    <input type="hidden" name="csrf_token" value="{_csrf_token(request, config)}">
+    {_signup_error(error)}
+    <label>Email<input name="email" type="email" autocomplete="email" required></label>
+    <label>Name<input name="name" autocomplete="name" placeholder="Optional"></label>
+    <label>Password<input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+    <label>Confirm password<input name="password_confirm" type="password" autocomplete="new-password" minlength="8" required></label>
+    <button class="button primary full" type="submit">Create account</button>
+    <a class="button secondary full" href="/login">Already have an account? Sign in</a>
+    <p class="fine-print">A private workspace is created for you. Passwords are stored as salted PBKDF2 hashes.</p>
+  </form>
+</main>
+""",
+            nav_active="login",
+        )
+
+    @app.post("/signup")
+    def signup_post(
+        request: Request,
+        email: str = Form(...),
+        password: str = Form(...),
+        password_confirm: str = Form(...),
+        name: str = Form(""),
+        csrf_token: str = Form(""),
+    ):
+        if not _password_login_enabled(config):
+            return RedirectResponse("/login", status_code=303)
+        _enforce_rate_limit(_SIGNUP_RATE_LIMITER, request, detail="too many signup attempts, try again later")
+        _require_csrf(request, config, csrf_token)
+        try:
+            container.create_account.execute(
+                CreateAccountCommand(email=email, password=password, password_confirm=password_confirm, name=name)
+            )
+        except SignupError as exc:
+            return RedirectResponse(f"/signup?error={exc.code}", status_code=303)
+        if config.dashboard_require_email_verification:
+            # Soft verification: the account is usable immediately and the
+            # dashboard nags until the link is clicked.
+            container.send_verification_email.execute(
+                SendVerificationEmailCommand(login=email.strip().lower(), base_url=config.public_base_url)
+            )
+        return RedirectResponse("/login?created=1", status_code=303)
+
     @app.get("/auth/github/start")
     def github_oauth_start(next: str = "/runs"):
-        if not _github_oauth_enabled(config):
+        if not _oauth_login_enabled(config):
             return RedirectResponse("/login?error=github_oauth_disabled", status_code=303)
         query = urlencode(
             {
@@ -407,7 +487,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/auth/github/callback")
     def github_oauth_callback(code: str = "", state: str = ""):
         next_path = _verify_oauth_state(state, config) or "/runs"
-        if not code or not _github_oauth_enabled(config):
+        if not code or not _oauth_login_enabled(config):
             return RedirectResponse("/login?error=github_oauth_failed", status_code=303)
         if config.github_oauth_mock_enabled and code == "mock":
             access_token = "mock-oauth-token"
@@ -456,7 +536,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 avatar_url=str(user_payload.get("avatar_url") or "") or None,
             )
         )
-        response = RedirectResponse(next_path, status_code=303)
+        response = RedirectResponse(
+            _post_login_destination(container, queries, config, login_name, next_path), status_code=303
+        )
         response.set_cookie(
             SESSION_COOKIE,
             _sign_session(login_name, config),
@@ -475,20 +557,25 @@ def create_app(database_url: str | None = None) -> FastAPI:
         next_path: str = Form("/runs"),
         csrf_token: str = Form(""),
     ):
+        if not _password_login_enabled(config):
+            return RedirectResponse("/login?error=invalid", status_code=303)
         _enforce_rate_limit(_LOGIN_RATE_LIMITER, request, detail="too many login attempts, try again later")
         _require_csrf(request, config, csrf_token)
-        if not _valid_login(config, username, password):
+        login_name = username if _valid_login(config, username, password) else _db_login(container, username, password)
+        if not login_name:
             return RedirectResponse("/login?error=invalid", status_code=303)
-        response = RedirectResponse(_safe_next_path(next_path), status_code=303)
+        response = RedirectResponse(
+            _post_login_destination(container, queries, config, login_name, next_path), status_code=303
+        )
         response.set_cookie(
             SESSION_COOKIE,
-            _sign_session(username, config),
+            _sign_session(login_name, config),
             httponly=True,
             secure=config.dashboard_secure_cookies,
             samesite="lax",
             max_age=SESSION_TTL_SECONDS,
         )
-        container.record_audit.execute(RecordAuditCommand(actor=username, event="auth.login", target="dashboard"))
+        container.record_audit.execute(RecordAuditCommand(actor=login_name, event="auth.login", target="dashboard"))
         return response
 
     @app.post("/logout")
@@ -505,6 +592,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def runs(request: Request):
         workspace_id = _request_workspace_id(request, config, queries)
         display_runs = _runs_for_display(queries, config, limit=50, workspace_id=workspace_id)
+        showing_demo = _showing_demo_data(queries, config, workspace_id)
         stats_data = _stats(display_runs)
         total_runs = int(stats_data["total_runs"])
         repository_options = _run_filter_options(display_runs, "repo")
@@ -523,7 +611,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
       <a href="/issues"><span>ⓘ</span>Issues</a>
       <a href="/pull-requests"><span>⑂</span>Pull Requests</a>
       <a href="/tests"><span>✓</span>Tests</a>
-      <a href="/settings"><span>⚙</span>Settings</a>
+      <a data-tour="settings" href="/settings"><span>⚙</span>Settings</a>
       <a href="/billing"><span>▭</span>Billing</a>
       <a href="/audit-log"><span>▤</span>Audit Log</a>
     </nav>
@@ -538,6 +626,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
       </div>
     </header>
     {_page_tabs("runs")}
+    {_demo_data_banner(showing_demo)}
     <section id="metrics" class="runs-metrics">
       <article class="metric-card metric-card-with-detail">
         <span>Runs</span>
@@ -822,7 +911,14 @@ E     + where False = &lt;Response [503]&gt;.ok
             "Settings",
             "Workspace settings for GitHub tokens, provider keys, budgets, and safety controls.",
             "settings",
-            _settings_content(account, queries.provider_keys(), config, _csrf_token(request, config)),
+            _settings_content(
+                account,
+                queries.provider_keys(),
+                config,
+                _csrf_token(request, config),
+                app_installations=container.github_app.list_installations(),
+                key_test=_key_test_result(request),
+            ),
         )
 
     @app.get("/account", response_class=HTMLResponse)
@@ -832,8 +928,123 @@ E     + where False = &lt;Response [503]&gt;.ok
             "Account",
             "Your profile, GitHub identity, workspace membership, and session controls.",
             "settings",
-            _account_content(account, _csrf_token(request, config)),
+            _account_content(
+                account,
+                _csrf_token(request, config),
+                notice=_account_notice(request),
+                verification_required=config.dashboard_require_email_verification,
+            ),
         )
+
+    @app.post("/account/password")
+    def account_change_password(
+        request: Request,
+        current_password: str = Form(""),
+        new_password: str = Form(...),
+        new_password_confirm: str = Form(...),
+        csrf_token: str = Form(""),
+    ):
+        _enforce_rate_limit(_LOGIN_RATE_LIMITER, request, detail="too many attempts, try again later")
+        _require_csrf(request, config, csrf_token)
+        try:
+            container.change_password.execute(
+                ChangePasswordCommand(
+                    login=_account_login(request, config),
+                    current_password=current_password,
+                    new_password=new_password,
+                    new_password_confirm=new_password_confirm,
+                )
+            )
+        except AccountError as exc:
+            return RedirectResponse(f"/account?error={exc.code}", status_code=303)
+        return RedirectResponse("/account?ok=password", status_code=303)
+
+    @app.post("/account/email")
+    def account_update_email(request: Request, email: str = Form(...), csrf_token: str = Form("")):
+        _require_csrf(request, config, csrf_token)
+        login_name = _account_login(request, config)
+        try:
+            new_login = container.update_email.execute(UpdateEmailCommand(login=login_name, new_email=email))
+        except AccountError as exc:
+            return RedirectResponse(f"/account?error={exc.code}", status_code=303)
+        response = RedirectResponse("/account?ok=email", status_code=303)
+        if new_login != login_name:
+            # Password accounts sign sessions with their email; re-issue the
+            # cookie so the change does not log the user out.
+            response.set_cookie(
+                SESSION_COOKIE,
+                _sign_session(new_login, config),
+                httponly=True,
+                secure=config.dashboard_secure_cookies,
+                samesite="lax",
+                max_age=SESSION_TTL_SECONDS,
+            )
+        return response
+
+    @app.get("/onboarding", response_class=HTMLResponse)
+    def onboarding(request: Request):
+        account = queries.account(_session_login(request, config))
+        checklist = _onboarding_checklist(queries, container, config, account)
+        return _dashboard_page(
+            "Get started",
+            "A quick checklist to get PatchPilot fixing issues in your repositories.",
+            "overview",
+            _onboarding_content(account, checklist, _csrf_token(request, config)),
+        )
+
+    @app.post("/onboarding/skip")
+    def onboarding_skip(request: Request, csrf_token: str = Form("")):
+        _require_csrf(request, config, csrf_token)
+        container.complete_onboarding.execute(
+            CompleteOnboardingCommand(login=_account_login(request, config), reason="skipped")
+        )
+        return RedirectResponse("/overview", status_code=303)
+
+    @app.post("/onboarding/complete")
+    def onboarding_complete(request: Request, csrf_token: str = Form("")):
+        _require_csrf(request, config, csrf_token)
+        container.complete_onboarding.execute(
+            CompleteOnboardingCommand(login=_account_login(request, config), reason="completed")
+        )
+        return RedirectResponse("/overview", status_code=303)
+
+    @app.get("/github-app-setup", response_class=HTMLResponse)
+    def github_app_setup(request: Request):
+        installations = container.github_app.list_installations()
+        return _dashboard_page(
+            "GitHub App setup",
+            "Install the PatchPilot GitHub App so labeled issues trigger runs automatically.",
+            "github",
+            _github_app_setup_content(installations, container, config, request),
+        )
+
+    @app.get("/github-app-setup/start")
+    def github_app_setup_start(request: Request):
+        if not config.github_app_install_url:
+            return RedirectResponse("/github-app-setup?error=not_configured", status_code=303)
+        query = urlencode({"state": _sign_oauth_state("/github-app-setup", config)})
+        return RedirectResponse(f"{config.github_app_install_url}?{query}", status_code=303)
+
+    @app.get("/github-app-setup/callback")
+    def github_app_setup_callback(request: Request, installation_id: str = "", setup_action: str = ""):
+        if not installation_id:
+            return RedirectResponse("/github-app-setup?error=missing_installation", status_code=303)
+        # Provisional record; the `installation` webhook overwrites it with
+        # authoritative account data from GitHub.
+        container.github_app.upsert_installation(
+            installation_id=installation_id,
+            account_login=_account_login(request, config) or "pending-webhook",
+            status="active",
+        )
+        container.record_audit.execute(
+            RecordAuditCommand(
+                actor=_current_user(request, config),
+                event="github_app.setup_completed",
+                target="dashboard",
+                metadata={"installation_id": installation_id, "setup_action": setup_action},
+            )
+        )
+        return RedirectResponse("/github-app-setup?installed=1", status_code=303)
 
     @app.get("/billing", response_class=HTMLResponse)
     def billing(request: Request):
@@ -896,6 +1107,52 @@ E     + where False = &lt;Response [503]&gt;.ok
             "docs",
             _docs_content(),
         )
+
+    @app.get("/verify-email")
+    def verify_email(token: str = ""):
+        verified = container.verify_email.execute(VerifyEmailCommand(token=token))
+        return RedirectResponse(
+            "/account?ok=verified" if verified else "/account?error=verification_invalid", status_code=303
+        )
+
+    @app.post("/account/resend-verification")
+    def account_resend_verification(request: Request, csrf_token: str = Form("")):
+        _enforce_rate_limit(_LOGIN_RATE_LIMITER, request, detail="too many attempts, try again later")
+        _require_csrf(request, config, csrf_token)
+        sent = container.send_verification_email.execute(
+            SendVerificationEmailCommand(login=_account_login(request, config), base_url=config.public_base_url)
+        )
+        return RedirectResponse(
+            "/account?ok=verification_sent" if sent else "/account?error=verification_unavailable",
+            status_code=303,
+        )
+
+    @app.get("/faq", response_class=HTMLResponse)
+    def faq():
+        return _dashboard_page(
+            "FAQ",
+            "Common questions about requirements, cost, supported languages, and troubleshooting.",
+            "docs",
+            _faq_content(),
+        )
+
+    @app.post("/settings/test-provider-key")
+    def settings_test_provider_key(request: Request, provider: str = Form(...), csrf_token: str = Form("")):
+        _require_csrf(request, config, csrf_token)
+        if provider not in ("openai", "anthropic"):
+            return RedirectResponse("/settings?tested=unknown&status=unsupported#providers", status_code=303)
+        api_key = config.openai_api_key if provider == "openai" else config.anthropic_api_key
+        status = verify_provider_key(provider, api_key)
+        container.record_audit.execute(
+            RecordAuditCommand(
+                actor=_current_user(request, config),
+                event="settings.provider_key_tested",
+                target=provider,
+                result="success" if status == "ok" else "failure",
+                metadata={"status": status},
+            )
+        )
+        return RedirectResponse(f"/settings?tested={provider}&status={status}#providers", status_code=303)
 
     @app.get("/privacy", response_class=HTMLResponse)
     def privacy():
@@ -967,7 +1224,7 @@ def _page(title: str, body: str, *, nav_active: str, show_top_nav: bool = True, 
     footer = (
         """
     <footer style="text-align:center;padding:24px;font-size:13px;opacity:0.7;">
-      <a href="/privacy" style="color:inherit;">Privacy</a> &middot; <a href="/terms" style="color:inherit;">Terms</a>
+      <a href="/faq" style="color:inherit;">FAQ</a> &middot; <a href="/privacy" style="color:inherit;">Privacy</a> &middot; <a href="/terms" style="color:inherit;">Terms</a>
     </footer>
 """
         if show_top_nav
@@ -1008,7 +1265,7 @@ def _dashboard_page(title: str, description: str, nav_active: str, content: str)
       <a class="{_active(nav_active, 'issues')}" href="/issues"><span>ⓘ</span>Issues</a>
       <a class="{_active(nav_active, 'pull-requests')}" href="/pull-requests"><span>⑂</span>Pull Requests</a>
       <a class="{_active(nav_active, 'tests')}" href="/tests"><span>✓</span>Tests</a>
-      <a class="{_active(nav_active, 'settings')}" href="/settings"><span>⚙</span>Settings</a>
+      <a class="{_active(nav_active, 'settings')}" data-tour="settings" href="/settings"><span>⚙</span>Settings</a>
       <a class="{_active(nav_active, 'billing')}" href="/billing"><span>▭</span>Billing</a>
       <a class="{_active(nav_active, 'audit-log')}" href="/audit-log"><span>▤</span>Audit Log</a>
     </nav>
@@ -1231,15 +1488,57 @@ Queue a run to capture Docker stdout, stderr, exit code, and runtime.</pre></art
 """
 
 
-def _settings_content(account: dict, provider_rows: list[dict], config, csrf_token: str = "") -> str:
+def _settings_content(
+    account: dict,
+    provider_rows: list[dict],
+    config,
+    csrf_token: str = "",
+    app_installations: list[dict] | None = None,
+    key_test: tuple[str, str] | None = None,
+) -> str:
     github = account.get("github")
     user = account.get("user") or {}
     providers = {key["provider"]: key["key_hint"] for key in provider_rows}
     avatar = _avatar_html(user)
+    active_installations = [row for row in (app_installations or []) if row.get("status") == "active"]
+    if active_installations:
+        first = active_installations[0]
+        app_card = (
+            f'<label>Installed for<input value="{_escape_attr(str(first.get("account_login") or "unknown"))}" readonly></label>'
+            f'<label>Installations<input value="{len(active_installations)}" readonly></label>'
+            f'<p><a href="/github-app-setup">View installation details</a></p>'
+        )
+        app_pill = '<span class="pill ok">installed</span>'
+    else:
+        app_card = (
+            "<p>Not installed. New issues can only be queued manually until the app is set up.</p>"
+            '<p><a class="button outline" href="/github-app-setup">Set up the GitHub App</a></p>'
+        )
+        app_pill = '<span class="pill run">not installed</span>'
     return f"""
 <section class="app-grid two">
   <article id="account" class="app-card settings-card"><h2>Account</h2>{avatar}<label>User<input value="{_escape_attr(str(user.get('name')))}" readonly></label><label>Email<input value="{_escape_attr(str(user.get('email')))}" readonly></label><label>GitHub<input value="{_escape_attr(str((github or {}).get('login') or user.get('login') or 'not connected'))}" readonly></label><p><a href="/account">Open profile settings</a></p><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{csrf_token}"><button class="button outline" type="submit">Sign out</button></form></article>
-  <article id="providers" class="app-card settings-card"><h2>Provider Keys</h2><label>OpenAI API key<input value="{_escape_attr(providers.get('openai', 'not configured'))}" readonly></label><label>Anthropic API key<input value="{_escape_attr(providers.get('anthropic', 'not configured'))}" readonly></label><label>Artifact storage<input value="{_escape_attr(str(config.artifact_storage_dir))}" readonly></label></article>
+  <article id="providers" class="app-card settings-card">
+    <h2>Provider Keys</h2>
+    <p>PatchPilot needs an OpenAI or Anthropic key to generate patches. Keys are read from the server
+    environment (<code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>) and never stored in the database —
+    only the masked hint below is kept.</p>
+    {_provider_key_notice(key_test)}
+    <label>OpenAI API key<input value="{_escape_attr(providers.get('openai', 'not configured'))}" readonly></label>
+    <p><a href="https://platform.openai.com/api-keys">Create an OpenAI key</a>
+    <form method="post" action="/settings/test-provider-key"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="provider" value="openai"><button class="button outline" type="submit">Test OpenAI key</button></form></p>
+    <label>Anthropic API key<input value="{_escape_attr(providers.get('anthropic', 'not configured'))}" readonly></label>
+    <p><a href="https://console.anthropic.com/settings/keys">Create an Anthropic key</a>
+    <form method="post" action="/settings/test-provider-key"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="provider" value="anthropic"><button class="button outline" type="submit">Test Anthropic key</button></form></p>
+    <label>Artifact storage<input value="{_escape_attr(str(config.artifact_storage_dir))}" readonly></label>
+    <h3>What a run costs</h3>
+    <p class="fine-print">Estimates for a typical run (~50K input, ~8K output tokens). Actual cost depends on
+    repository size and iteration count; every run records its own estimate.</p>
+    <table class="app-table compact"><thead><tr><th>Model</th><th>Estimated cost</th></tr></thead><tbody>{_cost_example_rows()}</tbody></table>
+  </article>
+</section>
+<section class="app-grid two">
+  <article id="github-app" class="app-card settings-card"><header><h2>GitHub App</h2>{app_pill}</header>{app_card}</article>
 </section>
 <section class="app-grid two">
   <article id="run-policy" class="app-card settings-card"><h2>Run Policy</h2><label>Worker ID<input value="{_escape_attr(config.worker_id)}" readonly></label><label>Max attempts<input value="{config.worker_max_attempts}" readonly></label><label>Worker lease seconds<input value="{config.worker_lease_seconds}" readonly></label></article>
@@ -1248,6 +1547,111 @@ def _settings_content(account: dict, provider_rows: list[dict], config, csrf_tok
 <section id="safety" class="app-card">
   <header><h2>Safety Controls</h2><a href="/security">Review security</a></header>
   <div class="check-list columns"><p>✓ Redact secrets in logs</p><p>✓ Docker-only execution</p><p>✓ Command allowlist</p><p>✓ PR creation gated</p><p>✓ Runtime limits</p><p>✓ Persist audit trail</p></div>
+</section>
+"""
+
+
+_PROVIDER_KEY_TEST_MESSAGES = {
+    "ok": ("fine-print", "key is valid and the provider accepted it."),
+    "invalid": ("auth-error", "the provider rejected this key (401). Check for a typo or a revoked key."),
+    "forbidden": (
+        "auth-error",
+        "the key authenticated but lacks permission (403). Check the project or organization it belongs to.",
+    ),
+    "rate_limited": (
+        "fine-print",
+        "the key is valid but the account is rate limited or out of credit (429). Add billing credit to run.",
+    ),
+    "unreachable": ("auth-error", "could not reach the provider. Check network egress from the server."),
+    "not_configured": (
+        "auth-error",
+        "no key is set. Add it to the server environment and restart PatchPilot.",
+    ),
+    "unsupported": ("auth-error", "unknown provider."),
+}
+
+
+def _provider_key_notice(key_test: tuple[str, str] | None) -> str:
+    if not key_test:
+        return ""
+    provider, status = key_test
+    css_class, message = _PROVIDER_KEY_TEST_MESSAGES.get(status, _PROVIDER_KEY_TEST_MESSAGES["unsupported"])
+    return f'<p class="{css_class}">{_escape_attr(provider)}: {message}</p>'
+
+
+def _cost_example_rows() -> str:
+    rows = []
+    for model in ("gpt-4o-mini", "gpt-4.1", "claude-sonnet-4-5"):
+        estimate = estimate_cost_usd(model, 50_000, 8_000)
+        cost = estimate.get("estimated_cost_usd")
+        label = f"${float(cost):.3f}" if cost is not None else "not priced"
+        rows.append(f"<tr><td>{_escape_attr(model)}</td><td>{label}</td></tr>")
+    return "".join(rows)
+
+
+_FAQ_ITEMS = [
+    (
+        "What do I need to get started?",
+        "A GitHub account, an OpenAI or Anthropic API key, and a repository with a test command. "
+        "Docker must be available on the server so repository commands run in an isolated sandbox.",
+    ),
+    (
+        "Is the GitHub App required?",
+        "No. The app only adds automatic triggering — when an issue is labeled, a run starts by itself. "
+        "You can queue every run manually from the Runs page instead. See /github-app-setup.",
+    ),
+    (
+        "What does a run cost?",
+        "You pay your LLM provider directly for tokens; PatchPilot adds no per-token markup. A typical run "
+        "costs a few cents on a small model and up to a few tens of cents on a frontier model. Settings → "
+        "Provider Keys shows current estimates, and every run records its own cost.",
+    ),
+    (
+        "Which languages are supported?",
+        "Python repositories are the best-supported path today: setup and test commands are detected "
+        "automatically. Other languages work if you configure install and test commands in agent.yaml, "
+        "since the agent edits files and runs your commands rather than parsing a specific language.",
+    ),
+    (
+        "Can it work on private repositories?",
+        "Yes. Grant the GitHub App (or your GitHub token) access to the private repositories you want covered. "
+        "Code is cloned into a Docker sandbox with no outbound network during test execution and is removed "
+        "when the run finishes.",
+    ),
+    (
+        "Will it push code or open pull requests without asking?",
+        "No. PatchPilot only pushes a branch and opens a draft PR when the run is started with the open-PR "
+        "option enabled. Otherwise it reports the patch and test results and changes nothing on GitHub.",
+    ),
+    (
+        "A run failed — how do I troubleshoot?",
+        "Open the run's detail page: it lists every command with exit codes, the captured test output, the "
+        "proposed patch, and the tool calls the agent made. Most failures are a missing dependency in the "
+        "sandbox image or a test command that needs configuring for the repository.",
+    ),
+    (
+        "How do I keep my API keys safe?",
+        "Keys live in the server environment and are never written to the database — the dashboard stores only "
+        "a masked hint. Logs are redacted before being persisted. See the Security page for the full model.",
+    ),
+]
+
+
+def _faq_content() -> str:
+    items = "".join(
+        f'<article class="app-card"><h2>{_escape_attr(question)}</h2><p>{_escape_attr(answer)}</p></article>'
+        for question, answer in _FAQ_ITEMS
+    )
+    return f"""
+<section class="app-card">
+  <h2>Frequently asked questions</h2>
+  <p>New here? The step-by-step walkthrough lives in <code>docs/getting-started.md</code>, and the GitHub App
+  guide in <code>docs/github-app-setup.md</code>.</p>
+</section>
+<section class="app-grid two">{items}</section>
+<section class="app-card">
+  <p>Still stuck? Open the <a href="/feedback">Feedback</a> page or check <a href="/docs">Docs</a> and
+  <a href="/security">Security</a>.</p>
 </section>
 """
 
@@ -1262,20 +1666,52 @@ def _avatar_html(user: dict) -> str:
     )
 
 
-def _account_content(account: dict, csrf_token: str) -> str:
+def _account_content(
+    account: dict, csrf_token: str, *, notice: str = "", verification_required: bool = False
+) -> str:
     user = account.get("user") or {}
     workspace = account.get("workspace") or {}
     github = account.get("github")
     connected = "connected" if github else "not connected"
+    verification_banner = ""
+    if verification_required and user.get("id") and not user.get("email_verified_at"):
+        verification_banner = (
+            '<section class="app-card"><p class="auth-error">Your email address is not verified yet. '
+            "Check your inbox for the confirmation link — it expires 24 hours after it is sent.</p>"
+            '<form method="post" action="/account/resend-verification">'
+            f'<input type="hidden" name="csrf_token" value="{csrf_token}">'
+            '<button class="button outline" type="submit">Resend verification email</button></form></section>'
+        )
+    current_password_field = (
+        '<label>Current password<input name="current_password" type="password" '
+        'autocomplete="current-password" required></label>'
+        if user.get("password_hash")
+        else '<p class="fine-print">No password set yet — your session authorizes setting one.</p>'
+    )
     return f"""
+{notice}
+{verification_banner}
 <section class="app-grid two">
   <article id="profile" class="app-card settings-card">
     <h2>Profile</h2>
     {_avatar_html(user)}
     <label>Name<input value="{_escape_attr(str(user.get('name') or ''))}" readonly></label>
-    <label>Email<input value="{_escape_attr(str(user.get('email') or ''))}" readonly></label>
     <label>GitHub login<input value="{_escape_attr(str(user.get('login') or 'not connected'))}" readonly></label>
-    <p class="fine-print">Profile fields come from your GitHub account and update on each sign-in.</p>
+    <form method="post" action="/account/email">
+      <input type="hidden" name="csrf_token" value="{csrf_token}">
+      <label>Email<input name="email" type="email" value="{_escape_attr(str(user.get('email') or ''))}" required></label>
+      <button class="button outline" type="submit">Update email</button>
+    </form>
+  </article>
+  <article id="password" class="app-card settings-card">
+    <h2>Password</h2>
+    <form method="post" action="/account/password">
+      <input type="hidden" name="csrf_token" value="{csrf_token}">
+      {current_password_field}
+      <label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="8" required></label>
+      <label>Confirm new password<input name="new_password_confirm" type="password" autocomplete="new-password" minlength="8" required></label>
+      <button class="button outline" type="submit">Change password</button>
+    </form>
   </article>
   <article id="workspace" class="app-card settings-card">
     <h2>Workspace</h2>
@@ -1385,6 +1821,63 @@ def _github_content(connection: dict | None, repos: list[dict], config) -> str:
   <article id="repo-access" class="app-card"><h2>Repository Access</h2><table class="app-table compact"><tbody>{repo_rows}</tbody></table></article>
 </section>
 <section id="guardrail" class="app-card"><h2>PR Creation Guardrail</h2><p>PatchPilot never pushes or opens a PR unless the run is invoked with <code>--open-pr true</code>. Local dashboard links show simulated product flow unless credentials are configured.</p></section>
+"""
+
+
+_GITHUB_APP_SETUP_ERRORS = {
+    "not_configured": (
+        "GITHUB_APP_INSTALL_URL is not configured. Set it to your GitHub App's install page, "
+        "e.g. https://github.com/apps/patchpilot/installations/new."
+    ),
+    "missing_installation": "GitHub did not return an installation id. Try installing again.",
+}
+
+
+def _github_app_setup_content(installations: list[dict], container, config, request: Request) -> str:
+    notice = ""
+    error = _GITHUB_APP_SETUP_ERRORS.get(request.query_params.get("error") or "")
+    if error:
+        notice = f'<section class="app-card"><p class="auth-error">{error}</p></section>'
+    elif request.query_params.get("installed"):
+        notice = (
+            '<section class="app-card"><p class="fine-print">GitHub App installed. Repository details '
+            "arrive with the first webhook delivery, usually within seconds.</p></section>"
+        )
+    active = [row for row in installations if row.get("status") == "active"]
+    if active:
+        rows = "".join(
+            f"""<article class="app-card settings-card">
+    <header><h2>@{_escape_attr(str(row.get('account_login') or 'unknown'))}</h2><span class="pill ok">{_escape_attr(str(row.get('status')))}</span></header>
+    <label>Installation ID<input value="{_escape_attr(str(row.get('installation_id')))}" readonly></label>
+    <label>Repositories<input value="{len(container.github_app.list_repositories(str(row.get('installation_id'))))}" readonly></label>
+    <label>Installed<input value="{_escape_attr(str(row.get('installed_at') or 'unknown'))}" readonly></label>
+    <p><a href="https://github.com/settings/installations/{_escape_attr(str(row.get('installation_id')))}">Manage or uninstall on GitHub</a></p>
+  </article>"""
+            for row in active
+        )
+        status_section = f'<section class="app-grid two">{rows}</section>'
+        install_cta = '<a class="button outline" href="/github-app-setup/start">Install for another account</a>'
+    else:
+        status_section = ""
+        install_cta = '<a class="button primary" href="/github-app-setup/start">Install on GitHub</a>'
+    return f"""
+{notice}
+<section class="app-card">
+  <h2>Why install the GitHub App?</h2>
+  <p>Without the app, you queue every run by hand. With it, PatchPilot receives webhooks from your
+  repositories and starts a run automatically when an issue is labeled
+  <code>{_escape_attr(config.github_app_trigger_label)}</code>, posting the resulting draft PR back to the issue.</p>
+  <div class="check-list columns">
+    <p>✓ Contents: read &amp; write — clone code, push fix branches</p>
+    <p>✓ Issues: read — receive issue events and comments</p>
+    <p>✓ Pull requests: read &amp; write — open draft PRs</p>
+    <p>✓ Metadata: read — list accessible repositories</p>
+  </div>
+  <p>{install_cta}</p>
+  <p class="fine-print">Installation is recorded automatically via webhook — if you complete the install on
+  GitHub but land back here signed out, nothing is lost. See docs/github-app-setup.md for the full guide.</p>
+</section>
+{status_section}
 """
 
 
@@ -1679,6 +2172,23 @@ def _runs_for_display(queries, config, *, limit: int, workspace_id: int | None =
     return _sample_runs()[:limit]
 
 
+def _showing_demo_data(queries, config, workspace_id: int | None) -> bool:
+    """True when the page is padded with sample runs instead of real history."""
+    if not config.dashboard_demo_data_enabled:
+        return False
+    return not queries.list_runs(limit=1, workspace_id=workspace_id)
+
+
+def _demo_data_banner(showing_demo: bool) -> str:
+    if not showing_demo:
+        return ""
+    return (
+        '<section class="app-card demo-data-banner"><p><span class="pill setup">demo data</span> '
+        "These runs are illustrative samples, not your workspace history. Queue a real run to replace them, "
+        "or set <code>DASHBOARD_DEMO_DATA_ENABLED=false</code> to always show empty states.</p></section>"
+    )
+
+
 def _request_workspace_id(request: Request | None, config, queries) -> int | None:
     login = _current_user(request, config) if request is not None else None
     if login in {"local-dev", "anonymous", None}:
@@ -1935,6 +2445,7 @@ def _is_public_path(path: str) -> bool:
     return (
         path == "/"
         or path == "/login"
+        or path == "/signup"
         or path == "/auth/github/start"
         or path == "/auth/github/callback"
         or path == "/webhooks/github"
@@ -1944,6 +2455,8 @@ def _is_public_path(path: str) -> bool:
         or path == "/ready"
         or path == "/privacy"
         or path == "/terms"
+        or path == "/faq"
+        or path == "/verify-email"
         or path.startswith("/static/")
     )
 
@@ -1965,6 +2478,16 @@ def _require_csrf(request: Request, config, submitted: str) -> None:
     expected = _csrf_token(request, config)
     if not submitted or not hmac.compare_digest(submitted, expected):
         raise HTTPException(status_code=403, detail="invalid csrf token")
+
+
+def _db_login(container, email: str, password: str) -> str | None:
+    """Validate a self-service account; returns the session login or None."""
+    user = container.accounts.get_user_by_email(email.strip().lower())
+    if not user or not user.get("password_hash"):
+        return None
+    if not verify_password(password, str(user["password_hash"])):
+        return None
+    return str(user.get("login") or user["email"])
 
 
 def _valid_login(config, username: str, password: str) -> bool:
@@ -2038,6 +2561,14 @@ def _github_oauth_enabled(config) -> bool:
     return bool(config.github_oauth_client_id and config.github_oauth_client_secret and config.github_oauth_callback_url)
 
 
+def _password_login_enabled(config) -> bool:
+    return config.dashboard_auth_mode in ("password", "both")
+
+
+def _oauth_login_enabled(config) -> bool:
+    return config.dashboard_auth_mode in ("github-oauth", "both") and _github_oauth_enabled(config)
+
+
 def _github_app_credentials_configured(config) -> bool:
     has_key = bool(config.github_app_private_key or config.github_app_private_key_path)
     return bool(config.github_app_id and config.github_app_installation_id and has_key)
@@ -2103,6 +2634,165 @@ def _login_error(error: str | None) -> str:
     if error == "invalid":
         return '<p class="auth-error">Invalid username or password.</p>'
     return ""
+
+
+_SIGNUP_ERRORS = {
+    "invalid_email": "Enter a valid email address.",
+    "password_mismatch": "The passwords do not match.",
+    "weak_password": "Password must be at least 8 characters.",
+    "email_exists": "An account with this email already exists. Try signing in.",
+}
+
+
+def _signup_error(error: str | None) -> str:
+    message = _SIGNUP_ERRORS.get(error or "")
+    return f'<p class="auth-error">{message}</p>' if message else ""
+
+
+_ACCOUNT_ERRORS = {
+    "invalid_email": "Enter a valid email address.",
+    "email_exists": "Another account already uses this email.",
+    "wrong_password": "The current password is incorrect.",
+    "password_mismatch": "The new passwords do not match.",
+    "weak_password": "The new password must be at least 8 characters.",
+    "not_managed": (
+        "This admin account's credentials are set via the DASHBOARD_USERNAME and "
+        "DASHBOARD_PASSWORD environment variables."
+    ),
+    "verification_invalid": "That verification link is invalid, already used, or expired. Request a new one.",
+    "verification_unavailable": (
+        "Could not send a verification email. It may already be verified, or email delivery is not configured "
+        "on this server."
+    ),
+}
+
+_ACCOUNT_SUCCESS = {
+    "password": "Password updated.",
+    "email": "Email updated.",
+    "verified": "Email address verified.",
+    "verification_sent": "Verification email sent. Check your inbox.",
+}
+
+
+def _account_notice(request: Request) -> str:
+    message = _ACCOUNT_ERRORS.get(request.query_params.get("error") or "")
+    if message:
+        return f'<section class="app-card"><p class="auth-error">{message}</p></section>'
+    message = _ACCOUNT_SUCCESS.get(request.query_params.get("ok") or "")
+    if message:
+        return f'<section class="app-card"><p class="fine-print">{message}</p></section>'
+    return ""
+
+
+def _account_login(request: Request, config) -> str:
+    return _session_login(request, config) or ""
+
+
+def _key_test_result(request: Request) -> tuple[str, str] | None:
+    provider = request.query_params.get("tested")
+    status = request.query_params.get("status")
+    return (provider, status) if provider and status else None
+
+
+def _post_login_destination(container, queries, config, login_name: str, next_path: str) -> str:
+    """Where a fresh login should land: onboarding for first-time users.
+
+    Only the default destination is rewritten — an explicitly requested deep
+    link is always honored. Env-admin sessions have no user row and are left
+    alone; a workspace that already has runs predates onboarding and skips it.
+    """
+    destination = _safe_next_path(next_path)
+    if destination != "/runs" or not config.dashboard_onboarding_enabled:
+        return destination
+    user = container.accounts.get_user_by_login(login_name) if login_name else None
+    if not user or user.get("onboarding_completed_at"):
+        return destination
+    workspace = container.accounts.workspace_for_login(login_name)
+    workspace_id = int(workspace["id"]) if workspace and workspace.get("id") else None
+    if queries.list_runs(limit=1, workspace_id=workspace_id):
+        return destination
+    return "/onboarding"
+
+
+def _onboarding_checklist(queries, container, config, account: dict) -> list[dict]:
+    github = account.get("github")
+    provider_rows = queries.provider_keys()
+    configured_providers = {str(row.get("provider")) for row in provider_rows} if provider_rows else set()
+    api_key_done = bool(
+        config.openai_api_key or config.anthropic_api_key or configured_providers & {"openai", "anthropic"}
+    )
+    app_installed = bool(container.github_app.list_installations(limit=1))
+    workspace_id = (account.get("workspace") or {}).get("id")
+    has_runs = bool(queries.list_runs(limit=1, workspace_id=int(workspace_id) if workspace_id else None))
+    github_login = str((github or {}).get("login") or "")
+    return [
+        {
+            "title": "GitHub connection",
+            "done": bool(github),
+            "detail": f"Connected as @{github_login}" if github else "Sign in with GitHub to link your repositories.",
+            "href": "/github",
+            "action": "Connect GitHub",
+        },
+        {
+            "title": "API key",
+            "done": api_key_done,
+            "detail": "An OpenAI or Anthropic key powers code generation."
+            if not api_key_done
+            else "Provider key configured.",
+            "href": "/settings#providers",
+            "action": "Configure key",
+        },
+        {
+            "title": "GitHub App (optional)",
+            "done": app_installed,
+            "detail": "Install the app so new issues trigger runs automatically."
+            if not app_installed
+            else "App installed.",
+            "href": "/github-app-setup",
+            "action": "Install app",
+        },
+        {
+            "title": "First run",
+            "done": has_runs,
+            "detail": "Queue a run on any GitHub issue to see PatchPilot work."
+            if not has_runs
+            else "First run recorded.",
+            "href": "/runs",
+            "action": "Start a run",
+        },
+    ]
+
+
+def _onboarding_content(account: dict, checklist: list[dict], csrf_token: str) -> str:
+    user = account.get("user") or {}
+    name = str(user.get("name") or "there")
+    items = "".join(
+        f"""<article class="app-card settings-card">
+    <header><h2>{_escape_attr(item['title'])}</h2><span class="pill {'ok' if item['done'] else 'run'}">{'done' if item['done'] else 'pending'}</span></header>
+    <p>{_escape_attr(item['detail'])}</p>
+    {'' if item['done'] else f'<p><a class="button outline" href="{_escape_attr(item["href"])}">{_escape_attr(item["action"])}</a></p>'}
+  </article>"""
+        for item in checklist
+    )
+    required_done = all(item["done"] for item in checklist if "(optional)" not in item["title"])
+    finish = (
+        f'<form method="post" action="/onboarding/complete"><input type="hidden" name="csrf_token" value="{csrf_token}">'
+        '<button class="button primary" type="submit">Finish setup</button></form>'
+        if required_done
+        else ""
+    )
+    return f"""
+<section class="app-card"><h2>Welcome, {_escape_attr(name)}!</h2>
+<p>PatchPilot fixes GitHub issues autonomously: it plans a patch, edits code in a Docker sandbox, runs your tests, and opens a draft PR. A few steps get you to your first run.</p></section>
+<section class="app-grid two">{items}</section>
+<section class="app-card">
+  {finish}
+  <form method="post" action="/onboarding/skip"><input type="hidden" name="csrf_token" value="{csrf_token}">
+  <button class="button outline" type="submit">Skip for now</button></form>
+  <p class="fine-print">You can revisit this checklist any time at /onboarding. New to PatchPilot? Read the
+  walkthrough in docs/getting-started.md or browse the <a href="/faq">FAQ</a>.</p>
+</section>
+"""
 
 
 def _stats(runs: list[dict]) -> dict[str, float | int | str | None]:

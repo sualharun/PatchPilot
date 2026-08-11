@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import re
+import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from agent.application.ports.outbound import (
@@ -8,9 +12,11 @@ from agent.application.ports.outbound import (
     AuditLog,
     GitHubConnectionRepository,
     GitHubRepositoryGateway,
+    Mailer,
     ProviderKeyRepository,
     RepositoryCatalog,
 )
+from agent.application.services.passwords import MIN_PASSWORD_LENGTH, hash_password, verify_password
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +162,215 @@ class SeedRuntimeStateHandler:
                 workspace_id=workspace_id,
                 provider="anthropic",
                 key_hint=anthropic_key_hint,
+            )
+
+
+class SignupError(Exception):
+    """Signup rejected for a user-facing reason; ``code`` keys the message."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class CreateAccountCommand:
+    email: str
+    password: str
+    password_confirm: str
+    name: str | None = None
+
+
+class CreateAccountHandler:
+    def __init__(self, accounts: AccountRepository, audit_log: AuditLog) -> None:
+        self._accounts = accounts
+        self._audit_log = audit_log
+
+    def execute(self, command: CreateAccountCommand) -> dict[str, Any]:
+        email = command.email.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise SignupError("invalid_email")
+        if command.password != command.password_confirm:
+            raise SignupError("password_mismatch")
+        if len(command.password) < MIN_PASSWORD_LENGTH:
+            raise SignupError("weak_password")
+        if self._accounts.get_user_by_email(email):
+            raise SignupError("email_exists")
+        try:
+            user = self._accounts.create_password_user(
+                email=email,
+                name=(command.name or "").strip() or email.split("@", 1)[0],
+                password_hash=hash_password(command.password),
+            )
+        except ValueError:
+            # Concurrent signup with the same email won the race; the UNIQUE
+            # constraint on users.email backstops the store's re-check.
+            raise SignupError("email_exists") from None
+        self._audit_log.record_event(actor=email, event="auth.signup", target="dashboard")
+        return user
+
+
+class AccountError(Exception):
+    """Account change rejected for a user-facing reason; ``code`` keys the message."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class ChangePasswordCommand:
+    login: str
+    current_password: str
+    new_password: str
+    new_password_confirm: str
+
+
+class ChangePasswordHandler:
+    def __init__(self, accounts: AccountRepository, audit_log: AuditLog) -> None:
+        self._accounts = accounts
+        self._audit_log = audit_log
+
+    def execute(self, command: ChangePasswordCommand) -> None:
+        user = self._accounts.get_user_by_login(command.login) if command.login else None
+        if not user:
+            raise AccountError("not_managed")
+        # OAuth-only accounts have no password yet; session auth suffices to set one.
+        if user.get("password_hash") and not verify_password(command.current_password, str(user["password_hash"])):
+            raise AccountError("wrong_password")
+        if command.new_password != command.new_password_confirm:
+            raise AccountError("password_mismatch")
+        if len(command.new_password) < MIN_PASSWORD_LENGTH:
+            raise AccountError("weak_password")
+        self._accounts.set_user_password(user_id=int(user["id"]), password_hash=hash_password(command.new_password))
+        self._audit_log.record_event(actor=command.login, event="account.password_changed", target="dashboard")
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateEmailCommand:
+    login: str
+    new_email: str
+
+
+class UpdateEmailHandler:
+    def __init__(self, accounts: AccountRepository, audit_log: AuditLog) -> None:
+        self._accounts = accounts
+        self._audit_log = audit_log
+
+    def execute(self, command: UpdateEmailCommand) -> str:
+        """Update the email; returns the (possibly new) session login."""
+        email = command.new_email.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise AccountError("invalid_email")
+        user = self._accounts.get_user_by_login(command.login) if command.login else None
+        if not user:
+            raise AccountError("not_managed")
+        other = self._accounts.get_user_by_email(email)
+        if other and int(other["id"]) != int(user["id"]):
+            raise AccountError("email_exists")
+        # Password accounts use their email as session login; keep them in sync.
+        update_login = user.get("login") == user.get("email")
+        self._accounts.update_user_email(user_id=int(user["id"]), email=email, update_login=update_login)
+        self._audit_log.record_event(
+            actor=command.login,
+            event="account.email_changed",
+            target="dashboard",
+            metadata={"old_email": str(user.get("email")), "new_email": email},
+        )
+        return email if update_login else command.login
+
+
+EMAIL_VERIFICATION_TTL_HOURS = 24
+
+
+def _hash_token(token: str) -> str:
+    """Tokens are stored hashed: a leaked database row must not be redeemable."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class SendVerificationEmailCommand:
+    login: str
+    base_url: str
+
+
+class SendVerificationEmailHandler:
+    def __init__(self, accounts: AccountRepository, audit_log: AuditLog, mailer: Mailer) -> None:
+        self._accounts = accounts
+        self._audit_log = audit_log
+        self._mailer = mailer
+
+    def execute(self, command: SendVerificationEmailCommand) -> bool:
+        """Issue a fresh verification link. Returns True when SMTP accepted it."""
+        user = self._accounts.get_user_by_login(command.login) if command.login else None
+        if not user or user.get("email_verified_at"):
+            return False
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.now(UTC) + timedelta(hours=EMAIL_VERIFICATION_TTL_HOURS)).isoformat()
+        self._accounts.add_email_verification_token(
+            user_id=int(user["id"]), token_hash=_hash_token(token), expires_at=expires_at
+        )
+        link = f"{command.base_url.rstrip('/')}/verify-email?token={token}"
+        sent = self._mailer.send(
+            to_address=str(user["email"]),
+            subject="Verify your PatchPilot email",
+            body=(
+                "Welcome to PatchPilot.\n\n"
+                f"Confirm this email address by opening the link below within {EMAIL_VERIFICATION_TTL_HOURS} hours:\n\n"
+                f"{link}\n\n"
+                "If you did not create a PatchPilot account, you can ignore this message.\n"
+            ),
+        )
+        self._audit_log.record_event(
+            actor=str(user["email"]),
+            event="account.verification_sent",
+            target="dashboard",
+            result="success" if sent else "failure",
+        )
+        return sent
+
+
+@dataclass(frozen=True, slots=True)
+class VerifyEmailCommand:
+    token: str
+
+
+class VerifyEmailHandler:
+    def __init__(self, accounts: AccountRepository, audit_log: AuditLog) -> None:
+        self._accounts = accounts
+        self._audit_log = audit_log
+
+    def execute(self, command: VerifyEmailCommand) -> bool:
+        if not command.token:
+            return False
+        user = self._accounts.consume_email_verification_token(_hash_token(command.token))
+        if not user:
+            return False
+        self._audit_log.record_event(
+            actor=str(user.get("email") or "unknown"), event="account.email_verified", target="dashboard"
+        )
+        return True
+
+
+@dataclass(frozen=True, slots=True)
+class CompleteOnboardingCommand:
+    login: str
+    reason: str  # "skipped" | "completed"
+
+
+class CompleteOnboardingHandler:
+    def __init__(self, accounts: AccountRepository, audit_log: AuditLog) -> None:
+        self._accounts = accounts
+        self._audit_log = audit_log
+
+    def execute(self, command: CompleteOnboardingCommand) -> None:
+        user = self._accounts.get_user_by_login(command.login) if command.login else None
+        if not user:
+            return  # env-admin / local dev sessions have no user row to persist on
+        if not user.get("onboarding_completed_at"):
+            self._accounts.set_onboarding_completed(user_id=int(user["id"]))
+            self._audit_log.record_event(
+                actor=command.login, event=f"onboarding.{command.reason}", target="dashboard"
             )
 
 

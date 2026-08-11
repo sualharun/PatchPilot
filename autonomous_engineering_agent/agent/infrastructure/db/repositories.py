@@ -115,6 +115,32 @@ class SqlAccountRepository:
     def get_or_create_user(self, *, email: str, name: str) -> dict[str, Any]:
         return self._store.get_or_create_user(email=email, name=name)
 
+    def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        return self._store.get_user_by_email(email)
+
+    def get_user_by_login(self, login: str) -> dict[str, Any] | None:
+        return self._store.get_user_by_login(login)
+
+    def create_password_user(self, *, email: str, name: str, password_hash: str) -> dict[str, Any]:
+        return self._store.create_password_user(email=email, name=name, password_hash=password_hash)
+
+    def set_user_password(self, *, user_id: int, password_hash: str) -> None:
+        self._store.set_user_password(user_id=user_id, password_hash=password_hash)
+
+    def set_onboarding_completed(self, *, user_id: int) -> None:
+        self._store.set_onboarding_completed(user_id=user_id)
+
+    def add_email_verification_token(self, *, user_id: int, token_hash: str, expires_at: str) -> int:
+        return self._store.add_email_verification_token(
+            user_id=user_id, token_hash=token_hash, expires_at=expires_at
+        )
+
+    def consume_email_verification_token(self, token_hash: str) -> dict[str, Any] | None:
+        return self._store.consume_email_verification_token(token_hash)
+
+    def update_user_email(self, *, user_id: int, email: str, update_login: bool) -> None:
+        self._store.update_user_email(user_id=user_id, email=email, update_login=update_login)
+
     def upsert_github_user(
         self,
         *,
