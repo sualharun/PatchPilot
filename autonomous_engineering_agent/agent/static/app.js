@@ -362,8 +362,35 @@ function initTour() {
   render();
 }
 
+function initVideoEmbeds() {
+  for (const embed of document.querySelectorAll("[data-video-embed]")) {
+    const video = embed.querySelector("video");
+    const button = embed.querySelector(".video-play");
+    if (!video || !button) continue;
+
+    button.addEventListener("click", () => {
+      // Controls stay off until playback starts so the poster reads as a
+      // single clean image rather than a browser chrome sandwich.
+      video.controls = true;
+      embed.classList.add("is-playing");
+      video.play().catch(() => {
+        // Autoplay policy or a decode error: leave the controls up so the
+        // viewer can start it themselves rather than staring at a dead poster.
+        embed.classList.remove("is-playing");
+      });
+    });
+
+    video.addEventListener("ended", () => {
+      video.controls = false;
+      video.currentTime = 0;
+      embed.classList.remove("is-playing");
+    });
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initRunFilters();
   initSectionTabs();
   initTour();
+  initVideoEmbeds();
 });

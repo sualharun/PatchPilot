@@ -393,7 +393,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
             f"""
 <main class="auth-shell">
   <section class="auth-preview">
-    <img src="/static/ui/login.png" alt="PatchPilot login UI mockup">
+    {_video_embed("/static/ui/login.png", "PatchPilot product demo")}
   </section>
   <form class="auth-panel" method="post" action="/login">
     <p class="eyebrow">Secure workspace</p>
@@ -423,7 +423,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
             f"""
 <main class="auth-shell">
   <section class="auth-preview">
-    <img src="/static/ui/login.png" alt="PatchPilot login UI mockup">
+    {_video_embed("/static/ui/login.png", "PatchPilot product demo")}
   </section>
   <form class="auth-panel" method="post" action="/signup">
     <p class="eyebrow">Secure workspace</p>
@@ -795,31 +795,18 @@ E     + where False = &lt;Response [503]&gt;.ok
     def demo():
         return _page(
             "Workflow Demo",
-            """
+            f"""
 <main class="browser-page demo-browser">
   <header class="demo-nav">
     <a class="demo-brand" href="/"><span class="hex-mark">⌬</span><strong>PatchPilot</strong></a>
     <nav><a href="/docs">▱ Docs</a><a href="/security">▱ Security</a><a href="/github">◖ GitHub</a></nav>
   </header>
   <section class="demo-reference">
-    <h1>Watch PatchPilot resolve an issue <span>◷ 5 min demo</span></h1>
+    <h1>Watch PatchPilot resolve an issue <span>◷ 1:36 demo</span></h1>
     <div class="demo-content-grid">
       <section class="video-panel">
-        <div class="video-app">
-          <aside class="video-sidebar"><div class="cube">◇</div><a class="selected" href="/runs">▣ Runs</a><a href="/issues">◴ Issues</a><a href="/repositories">▤ Repositories</a><a href="/security">▧ Policies</a><a href="/settings">⚙ Settings</a></aside>
-          <div class="video-main">
-            <div class="run-video-head"><div><strong>Run #1287</strong><em>Completed</em><p>Triggered by webhook &nbsp; ⑂ main &nbsp; ↔ a1b2c3d</p></div><span>Started&nbsp; 2:14 PM</span><span>Duration&nbsp; ◷ 04:32</span></div>
-            <div class="tabs"><b>Overview</b><span>Logs</span><span>Artifacts</span><span>Evaluation</span></div>
-            <div class="overview-grid">
-              <article><h3>Workflow</h3><p>● Clone repository <span>00:18</span></p><p>● Inspect issue <span>00:42</span></p><p>● Patch code <span>01:21</span></p><p>● Run Docker tests <span>01:02</span></p><p>● Open draft PR <span>00:41</span></p></article>
-              <article><h3>Summary</h3><p>Files changed <b>3</b></p><p>Tests passed <b>24 / 24</b></p><p>Bench score <b>92.4 / 100</b></p><p>Token usage <b>18.7k</b></p><p>Estimated cost <b>$0.048</b></p></article>
-            </div>
-            <div class="logs-panel"><strong>Logs</strong><pre>14:17:03   INFO   Workflow completed successfully</pre></div>
-          </div>
-          <a class="large-play" href="/runs/101">▶</a>
-          <div class="video-controls"><span>▶</span><strong>0:00 / 5:02</strong><i></i><span>CC</span><span>1x</span><span>⚙</span><span>⛶</span></div>
-        </div>
-        <div class="chapters"><span>Chapters</span><b>● 0:00 Clone repository</b><b>● 0:18 Inspect issue</b><b>● 1:00 Patch code</b><b>● 2:21 Run Docker tests</b><b>● 3:23 Open draft PR</b></div>
+        {_video_embed("/static/ui/demo.png", "PatchPilot product demo")}
+        <div class="chapters"><span>In this demo</span><b>● Failing tests</b><b>● Queue a run</b><b>● Docker sandbox</b><b>● The patch</b><b>● Draft pull request</b></div>
       </section>
       <aside class="workflow-panel">
         <h2>Workflow</h2>
@@ -1654,6 +1641,35 @@ def _faq_content() -> str:
   <a href="/security">Security</a>.</p>
 </section>
 """
+
+
+DEMO_VIDEO_PATH = "/static/ui/demo.mp4"
+
+
+def _demo_video_available() -> bool:
+    return (Path(__file__).parents[2] / "static" / "ui" / "demo.mp4").exists()
+
+
+def _video_embed(poster: str, label: str) -> str:
+    """Poster image with a play overlay; clicking swaps in the real video.
+
+    Falls back to the plain poster when the video asset is absent, so a
+    checkout without the media file still renders a sensible page instead of a
+    broken player.
+    """
+    if not _demo_video_available():
+        return f'<img src="{_escape_attr(poster)}" alt="{_escape_attr(label)}">'
+    return (
+        '<div class="video-embed" data-video-embed>'
+        f'<video preload="none" playsinline poster="{_escape_attr(poster)}" '
+        f'aria-label="{_escape_attr(label)}">'
+        f'<source src="{DEMO_VIDEO_PATH}" type="video/mp4">'
+        "Your browser cannot play this video."
+        "</video>"
+        f'<button class="video-play" type="button" aria-label="Play {_escape_attr(label)}">'
+        '<span class="video-play-mark"></span></button>'
+        "</div>"
+    )
 
 
 def _avatar_html(user: dict) -> str:
