@@ -2472,6 +2472,7 @@ def _is_public_path(path: str) -> bool:
         or path == "/privacy"
         or path == "/terms"
         or path == "/faq"
+        or path == "/demo"
         or path == "/verify-email"
         or path.startswith("/static/")
     )

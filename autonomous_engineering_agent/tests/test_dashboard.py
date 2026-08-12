@@ -673,6 +673,13 @@ def test_faq_is_public_and_linked_from_login(monkeypatch, tmp_path):
     assert "What does a run cost?" in faq.text
     assert 'href="/faq"' in client.get("/login").text
 
+    # The landing page invites visitors to watch the demo, so it must not be
+    # gated behind a login they do not have.
+    demo = client.get("/demo")
+    assert demo.status_code == 200
+    assert "data-video-embed" in demo.text
+    assert "data-video-embed" in client.get("/login").text
+
 
 def test_settings_provider_key_test_button(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
